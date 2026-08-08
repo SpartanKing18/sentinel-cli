@@ -15,7 +15,7 @@ const crypto = require("crypto");
 const readline = require("readline");
 const os = require("os");
 const dnsp = require("dns").promises;
-const VERSION = "2.17.0";
+const VERSION = "2.18.0";
 
 // ---------- colors ----------
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;

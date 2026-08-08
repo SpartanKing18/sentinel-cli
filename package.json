@@ -1,6 +1,6 @@
 {
   "name": "sentinel-cli",
-  "version": "2.17.0",
+  "version": "2.18.0",
   "description": "Sentinel — terminal edition. A dependency-free security console CLI/TUI for Windows and Linux: native port scanner, reverse shells, encoders, payloads, and cheat sheets.",
   "bin": { "sentinel": "sentinel.js" },
   "main": "sentinel.js",
