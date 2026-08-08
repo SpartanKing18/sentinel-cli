@@ -20,7 +20,17 @@ binaries that need no runtime at all. Perfect for a headless box over SSH.
 
 ## Install
 
-**Standalone binary — no Node required**
+**git clone — smallest, self-updating (needs Node 18+)**
+
+```bash
+git clone https://github.com/SpartanKing18/sentinel-cli
+cd sentinel-cli
+node sentinel.js            # or: node sentinel.js scan 10.0.0.1
+```
+
+Only ~300 KB on disk (one file), and `git pull` gets the latest. No `npm install` — it uses only Node built-ins.
+
+**Standalone binary — no Node required (~52 MB)**
 
 ```bash
 # Linux
