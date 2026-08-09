@@ -576,6 +576,7 @@ async function mainMenu() {
     ["i", "My public IP", async () => { h1("Public IP"); console.log("  " + await myIp()); }],
     ["g", "GitHub (clone / push)", menuGit],
     ["c", "Cheat sheets", menuCheats],
+    ["a", "AI coder (local Ollama)", async () => aiCoder("")],
     ["t", "Tools catalog", async () => listTools()],
     ["0", "Exit", null],
   ];
@@ -719,14 +720,91 @@ async function cli(args) {
   else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
+  else if (cmd === "code" || cmd === "ai") await aiCoder(rest.join(" "));
   else usage();
 }
+
+// ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
+function ollamaChat(model, messages, format) {
+  return new Promise((resolve, reject) => {
+    const HOST = process.env.OLLAMA_HOST || "127.0.0.1", PORT = +(process.env.OLLAMA_PORT || 11434);
+    const body = JSON.stringify({ model, stream: false, format, keep_alive: "30m", options: { temperature: 0.2, num_ctx: 16384 }, messages });
+    const req = http.request({ host: HOST, port: PORT, path: "/api/chat", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+      (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { try { resolve(JSON.parse(d).message.content || ""); } catch (e) { reject(new Error("bad model response")); } }); });
+    req.on("error", (e) => reject(new Error("cannot reach Ollama at " + HOST + ":" + PORT + " — is it running? (" + e.message + ")"))); req.write(body); req.end();
+  });
+}
+function ollamaTags() {
+  return new Promise((resolve) => {
+    const HOST = process.env.OLLAMA_HOST || "127.0.0.1", PORT = +(process.env.OLLAMA_PORT || 11434);
+    http.get({ host: HOST, port: PORT, path: "/api/tags" }, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { try { resolve((JSON.parse(d).models || []).map((m) => m.name)); } catch (_) { resolve([]); } }); }).on("error", () => resolve([]));
+  });
+}
+function pickCoderModel(ms) {
+  const pri = ["qwen2.5-coder", "deepseek-coder", "codellama", "hermes3", "dolphin3", "llama3.1"];
+  for (const p of pri) { const hit = ms.find((m) => m.toLowerCase().startsWith(p)); if (hit) return hit; }
+  return ms.find((m) => /coder|code/i.test(m)) || ms[0] || "";
+}
+const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
+function coderShell(command, cwd) {
+  return new Promise((resolve) => {
+    const p = spawn(process.platform === "win32" ? "cmd.exe" : "/bin/sh", [process.platform === "win32" ? "/c" : "-c", command], { cwd });
+    let out = ""; const cap = 12000;
+    const add = (d) => { if (out.length < cap + 200) out += d.toString(); };
+    const to = setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} }, 120000);
+    p.stdout.on("data", add); p.stderr.on("data", add);
+    p.on("close", (code) => { clearTimeout(to); resolve({ code, output: out.length > cap ? out.slice(0, cap) + "\n...[truncated]" : (out || "(no output)") }); });
+    p.on("error", (e) => { clearTimeout(to); resolve({ code: -1, output: "spawn error: " + e.message }); });
+  });
+}
+async function aiCoder(initialPrompt) {
+  const fs = require("fs"), path = require("path");
+  const cwd = process.cwd();
+  const ms = await ollamaTags();
+  if (!ms.length) { banner(); console.log("  " + red("No local model found. Install Ollama (https://ollama.com), then e.g. `ollama pull qwen2.5-coder` or `ollama pull hermes3`.")); return; }
+  const model = process.env.SENTINEL_MODEL || pickCoderModel(ms);
+  banner(); h1("AI coder");
+  console.log("  " + gray("model ") + mag(model) + gray("   workdir ") + cyan(cwd));
+  console.log("  " + gray("Reads/writes files and runs commands right here. Type a task; 'exit' to quit.\n"));
+  const SYS = "You are Sentinel Coder, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
+  const messages = [{ role: "system", content: SYS }];
+  let task = (initialPrompt || "").trim();
+  while (true) {
+    if (!task) { task = await ask("task>"); if (!task || /^(exit|quit|q)$/i.test(task)) { console.log("\n  " + gray("stay sharp.") + "\n"); return; } }
+    messages.push({ role: "user", content: task }); task = "";
+    let didTool = false, nudges = 0;
+    for (let step = 1; step <= 40; step++) {
+      let raw; try { raw = await ollamaChat(model, messages, CODER_SCHEMA); } catch (e) { console.log("  " + red(e.message)); break; }
+      let o; try { o = JSON.parse(raw); } catch (_) { messages.push({ role: "tool", content: "Reply with valid schema JSON only." }); continue; }
+      messages.push({ role: "assistant", content: raw });
+      if (o.thought) console.log("  " + gray("• " + o.thought));
+      if (o.action === "final") {
+        if (!didTool && nudges++ < 3) { messages.push({ role: "tool", content: "You have not taken any action yet. Do the real work first." }); continue; }
+        console.log("\n  " + green("✓ ") + bold(o.final || "done") + "\n"); break;
+      }
+      const name = o.tool, a = o.args || {}; let result;
+      try {
+        if (name === "read_file") { const t = fs.readFileSync(path.resolve(cwd, a.path), "utf8"); result = { content: t.slice(0, 16000) }; console.log("  " + cyan("read ") + a.path); }
+        else if (name === "write_file") { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines)")); }
+        else if (name === "edit_file") { const fp = path.resolve(cwd, a.path); let t = fs.readFileSync(fp, "utf8"); if (!t.includes(a.find)) { result = { error: "find text not present in file" }; } else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; console.log("  " + green("edit ") + a.path); } }
+        else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; console.log("  " + cyan("ls ") + (a.path || ".")); }
+        else if (name === "run_command") { console.log("  " + mag("$ ") + a.command); const r = await coderShell(a.command, cwd); result = { code: r.code, output: r.output }; if (r.output) console.log(r.output.split("\n").slice(0, 20).map((l) => "    " + gray(l)).join("\n")); }
+        else { result = { error: "unknown tool '" + name + "' (use read_file/write_file/edit_file/list_dir/run_command)" }; }
+      } catch (e) { result = { error: e.message }; }
+      if (["read_file", "write_file", "edit_file", "list_dir", "run_command"].includes(name)) didTool = true;
+      messages.push({ role: "tool", content: JSON.stringify(result).slice(0, 16000) });
+      if (step === 40) console.log("  " + red("(step limit reached)"));
+    }
+  }
+}
+
 function usage() {
   banner();
   console.log(`  ${bold("USAGE")}
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
+    code [task]                       AI coding agent (local Ollama): edits files & runs commands
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
