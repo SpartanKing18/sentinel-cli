@@ -1220,9 +1220,19 @@ function nexusTui(engine, cwd, nexusMd) {
     const CMDS = [
       ["/help", "commands, input prefixes & keys"], ["/clear", "start a fresh chat"], ["/compact", "summarize & shrink the context"],
       ["/context", "show token / context usage"], ["/cost", "session token cost so far"], ["/budget", "set a spend cap in USD"],
-      ["/undo", "revert the last turn's file changes"], ["/checkpoints", "list undo checkpoints"], ["/init", "scaffold .nexus/ in this project"],
-      ["/model", "show or set the model"], ["/engine", "switch claude | opencode | ollama"], ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
+      ["/undo", "revert the last turn's file changes"], ["/rewind", "restore a specific checkpoint (/rewind N)"], ["/checkpoints", "list undo checkpoints"],
+      ["/resume", "reload the last saved session"], ["/export", "save the conversation to a markdown file"], ["/copy", "copy the last reply to the clipboard"],
+      ["/status", "session engine, model, tokens & cost"], ["/doctor", "check engines & tools are available"], ["/init", "scaffold .nexus/ in this project"],
+      ["/model", "show or set the model"], ["/engine", "switch claude | opencode | ollama"], ["/commands", "list custom project commands"], ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
+    // Custom project slash commands (Claude-Code / Glitch style): each .md file in
+    // .nexus/commands/ or .claude/commands/ becomes /<name>; its body is the prompt,
+    // with $ARGUMENTS / $1 $2… substituted from what you type after the command.
+    const customCmds = {};
+    for (const dir of [path.join(cwd, ".nexus", "commands"), path.join(cwd, ".claude", "commands")]) {
+      try { for (const f of fs.readdirSync(dir)) { if (!/\.md$/.test(f)) continue; const nm = "/" + f.replace(/\.md$/, ""); if (customCmds[nm]) continue; const body = fs.readFileSync(path.join(dir, f), "utf8"); const desc = ((body.split("\n").find((l) => l.trim()) || "custom command").replace(/^#+\s*/, "") + " (custom)").slice(0, 52); customCmds[nm] = { body, desc }; } } catch (_) {}
+    }
+    const allCmds = () => CMDS.concat(Object.keys(customCmds).map((k) => [k, customCmds[k].desc]));
     // ---- inline markdown / command coloring ----
     const paintCode = (c) => (/(^|\s)(node|npm|npx|git|python3?|pip3?|bash|sh|cd|ls|cat|make|cargo|go|docker|curl|grep|sed|rm|mkdir|chmod|sudo)\b/.test(c) || /\s--?\w/.test(c)) ? blue(c) : mag(c);
     const colorMd = (line, inCode) => { if (inCode) return blue(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => paintCode(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
@@ -1263,6 +1273,9 @@ function nexusTui(engine, cwd, nexusMd) {
             const vis = it.full.slice(0, it.shown);
             let inCode = false;
             for (const ln of wrap(vis)) { if (/^```/.test(ln.trim())) { inCode = !inCode; L.push("  " + gray(ln)); continue; } L.push("  " + colorMd(ln, inCode)); }
+          } else if (it.type === "thinking") {
+            L.push("  " + dim(gray("✻ thinking" + (expanded ? ":" : " (ctrl+o to show)"))));
+            if (expanded) for (const ln of wrap(it.full).slice(0, 24)) L.push("    " + dim(gray(ln)));
           } else if (it.type === "tool") {
             const dot = it.status === "run" ? yellow(spin[(Date.now() / 90 | 0) % spin.length]) : it.status === "err" ? red("●") : green("●");
             const secs = it.end ? ((it.end - it.start) / 1000).toFixed(1) + "s" : ((Date.now() - it.start) / 1000).toFixed(1) + "s";
@@ -1309,10 +1322,10 @@ function nexusTui(engine, cwd, nexusMd) {
       return clip("  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("@") + gray("file ") + blue("!") + gray("sh ") + blue("#") + gray("note  ") + blue("/") + gray("cmds"), C - 2);
     };
     // matching slash commands for the popup menu (active when the input is a bare /command being typed)
-    const slashMatches = () => { if (busy || input[0] !== "/" || /\s/.test(input)) return []; const q = input.toLowerCase(); return CMDS.filter((c) => c[0].startsWith(q)); };
+    const slashMatches = () => { if (busy || input[0] !== "/" || /\s/.test(input)) return []; const q = input.toLowerCase(); return allCmds().filter((c) => c[0].startsWith(q)); };
     const render = () => {
       const C = cols(), R = rows(), iw = Math.max(4, C - 3);
-      const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } }
+      const wrapped = []; for (const seg of input.split("\n")) { let s = seg; if (!s.length) { wrapped.push(""); continue; } while (s.length > iw) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } wrapped.push(s); } if (!wrapped.length) wrapped.push("");
       const menu = slashMatches();
       const menuRows = Math.min(menu.length, Math.max(0, R - 8));
       // clamp input rows so the whole chrome always fits even on short terminals
@@ -1389,12 +1402,14 @@ function nexusTui(engine, cwd, nexusMd) {
         block.summary = bits.join("  ·  ");
         cont = true; busy = false; if (costCap && sess.cost >= costCap) transcript.push({ role: "system", text: "budget cap reached ($" + sess.cost.toFixed(4) + ") — /budget <amount> to raise" });
         if (!warned50 && sess.ctxUsed > 0.5 * (sess.ctxWindow || 200000)) { warned50 = true; transcript.push({ role: "system", text: "context is over 50% — quality can dip on very long sessions; use /compact or /clear when it makes sense" }); }
+        try { saveSession(); } catch (_) {}
         maybeAutoCompact(); render();
       };
       if (engine === "claude") {
         runClaudeStream(promptText, cwd, cont, {
           onInit: (ev) => { if (ev.model) sess.model = ev.model; },
           onRateLimit: (info) => { rate = info; },
+          onThinking: (t) => { const bl = cur(); if (!bl.items) bl.items = []; let last = bl.items[bl.items.length - 1]; if (!last || last.type !== "thinking") { last = { type: "thinking", full: "" }; bl.items.push(last); } last.full += t; render(); },
           onText: (t) => { ensureText().full += t; render(); },
           onTool: (tu) => {
             block.items.push({ type: "tool", id: tu.id, name: tu.name, label: toolLabel(tu.name, tu.input), detail: JSON.stringify(tu.input).slice(0, 400), status: "run", start: Date.now() });
@@ -1468,9 +1483,21 @@ function nexusTui(engine, cwd, nexusMd) {
       }
     };
     // ---- slash commands ----
+    const saveSession = () => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "session.json"), JSON.stringify({ engine, model: sess.model, transcript, sess, ts: Date.now() })); } catch (_) {} };
     const handleSlash = (t) => {
-      const [cmd, arg] = t.split(/\s+/);
-      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help  /clear  /compact  /context  /cost  /budget <usd>  /undo  /checkpoints  /init  /model [name]  /engine <claude|opencode|ollama>  /expand  /exit\ninput:  @file inlines a file · !cmd runs a shell command · #note saves to NEXUS.md\nkeys:  shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history" });
+      const sp = t.indexOf(" ");
+      const cmd = (sp === -1 ? t : t.slice(0, sp)).toLowerCase();
+      const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
+      const arg = argstr.split(/\s+/)[0];
+      if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
+      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help /clear /compact /context /cost /budget /undo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\ninput:  @file inlines a file (Tab completes paths) · !cmd runs a shell command · #note saves to NEXUS.md · end a line with \\ for a new line\nkeys:  shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / for the command menu" });
+      else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
+      else if (cmd === "/status") transcript.push({ role: "system", text: "status:\n  engine   " + engine + (sess.model && sess.model !== engine ? " (" + sess.model + ")" : "") + "\n  dir      " + cwd + "\n  mode     " + MODES[mode].k + "\n  context  " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "% of " + fmtK(sess.ctxWindow) + "\n  tokens   ↑" + fmtK(sess.inTok) + " ↓" + fmtK(sess.outTok) + (PAID[engine] ? (sess.cost ? " · $" + sess.cost.toFixed(4) : " · billed") : " · local · free") + "\n  budget   " + (costCap ? "$" + costCap.toFixed(2) + " cap" : "none") + "\n  undo     " + checkpoints.length + " checkpoint(s)" });
+      else if (cmd === "/doctor") transcript.push({ role: "system", text: "doctor:\n  claude CLI   " + (hasBin("claude") ? "found" : "not found (needed for the claude engine)") + "\n  opencode     " + (hasBin("opencode") ? "found" : "not found") + "\n  git          " + (hasBin("git") ? "found — /undo & checkpoints active" : "not found — /undo disabled") + "\n  node         " + process.version + "\n  ollama is checked live when you switch to it" });
+      else if (cmd === "/resume") { try { const s = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "session.json"), "utf8")); transcript.length = 0; for (const b of s.transcript) transcript.push(b); if (s.sess) Object.assign(sess, s.sess); cont = true; scroll = 0; transcript.push({ role: "system", text: "resumed the saved session from " + new Date(s.ts).toLocaleString() }); } catch (_) { transcript.push({ role: "system", text: "no saved session to resume (sessions are saved to .nexus/session.json after each turn)" }); } }
+      else if (cmd === "/export") { try { const L = ["# Nexus conversation", "", "_" + new Date().toLocaleString() + " · " + engine + " · " + cwd + "_", ""]; for (const m of transcript) { if (m.role === "user") L.push("## You", "", m.text, ""); else if (m.role === "nexus") { L.push("## Nexus", ""); for (const it of (m.items || [])) { if (it.type === "text") L.push(it.full); else if (it.type === "tool") L.push("- `" + it.label + "`"); } L.push(""); } else if (m.role === "system") L.push("> " + String(m.text).replace(/\n/g, " "), ""); } const fp = path.join(cwd, "nexus-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".md"); fs.writeFileSync(fp, L.join("\n")); transcript.push({ role: "system", text: "exported conversation → " + path.relative(cwd, fp) }); } catch (e) { transcript.push({ role: "system", text: "export failed: " + e.message }); } }
+      else if (cmd === "/copy") { let last = ""; for (let i = transcript.length - 1; i >= 0; i--) { const m = transcript[i]; if (m.role === "nexus") { last = (m.items || []).filter((it) => it.type === "text").map((it) => it.full).join("\n").trim(); if (last) break; } } if (last) { out.write("\x1b]52;c;" + Buffer.from(last).toString("base64") + "\x07"); transcript.push({ role: "system", text: "copied Nexus's last reply to the clipboard" }); } else transcript.push({ role: "system", text: "nothing to copy yet" }); }
+      else if (cmd === "/rewind") { if (!checkpoints.length) transcript.push({ role: "system", text: "no checkpoints to rewind to" }); else { const n = parseInt(arg, 10); const idx = isNaN(n) ? checkpoints.length - 1 : n - 1; const ck = checkpoints[idx]; if (!ck) transcript.push({ role: "system", text: "no checkpoint #" + arg + " — /checkpoints to list them" }); else { const ok = nexusRestore(cwd, ck.tree); if (ok) checkpoints.length = idx; transcript.push({ role: "system", text: ok ? ("rewound to checkpoint #" + (idx + 1) + " (before \"" + ck.label + "\") — tracked files restored") : "rewind failed (git error)" }); } } }
       else if (cmd === "/clear" || cmd === "/new") { transcript.length = 0; transcript.push({ role: "art" }, { role: "system", text: "new chat  ·  " + engine + "  ·  " + cwd }); cont = false; oMsgs.length = 1; sess.ctxUsed = 0; scroll = 0; }
       else if (cmd === "/compact") doCompact(false);
       else if (cmd === "/context") transcript.push({ role: "system", text: "context: " + fmtK(sess.ctxUsed) + " / " + fmtK(sess.ctxWindow) + " tokens (" + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "%)  ·  window " + fmtK(sess.ctxWindow) });
@@ -1517,8 +1544,15 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x1b[B") { if (history.length) { hIdx = Math.min(history.length, hIdx + 1); input = history[hIdx] || ""; render(); } return; } // down
       if (s.charCodeAt(0) === 27) return;                                // other escapes
       for (const ch of s) {
-        if (ch === "\t") { const mm = slashMatches(); if (mm.length) { input = mm[0][0] + " "; render(); } return; } // Tab completes the slash command
-        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { let cmd = t; if (!/\s/.test(t)) { const mm = CMDS.filter((c) => c[0].startsWith(t.toLowerCase())); if (mm.length && !mm.some((c) => c[0] === t.toLowerCase())) cmd = mm[0][0]; } handleSlash(cmd); render(); return; } if (t[0] === "!" && t.length > 1) { runBang(t.slice(1).trim()); render(); return; } if (t[0] === "#" && t.length > 1) { addMemory(t.slice(1).trim()); render(); return; } if (t) { submit(t); return; } render(); }
+        if (ch === "\t") { // Tab completes a slash command, else an @file path
+          const mm = slashMatches(); if (mm.length) { input = mm[0][0] + " "; render(); return; }
+          const at = input.match(/@([^\s]*)$/);
+          if (at) { try { const pt = at[1]; const dir = pt.includes("/") ? pt.slice(0, pt.lastIndexOf("/") + 1) : ""; const bpart = pt.includes("/") ? pt.slice(pt.lastIndexOf("/") + 1) : pt; const entries = fs.readdirSync(path.resolve(cwd, dir || ".")).filter((e) => e.startsWith(bpart)).sort(); if (entries.length) { const hit = entries[0]; const isDir = fs.statSync(path.resolve(cwd, dir + hit)).isDirectory(); input = input.slice(0, at.index) + "@" + dir + hit + (isDir ? "/" : " "); } } catch (_) {} render(); }
+          return;
+        }
+        if (ch === "\r" || ch === "\n") {
+          if (input.endsWith("\\")) { input = input.slice(0, -1) + "\n"; render(); return; } // trailing backslash = newline, not submit
+          const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { let cmd = t; if (!/\s/.test(t)) { const mm = allCmds().filter((c) => c[0].startsWith(t.toLowerCase())); if (mm.length && !mm.some((c) => c[0] === t.toLowerCase())) cmd = mm[0][0]; } handleSlash(cmd); render(); return; } if (t[0] === "!" && t.length > 1) { runBang(t.slice(1).trim()); render(); return; } if (t[0] === "#" && t.length > 1) { addMemory(t.slice(1).trim()); render(); return; } if (t) { submit(t); return; } render(); }
         else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
         else if (ch >= " ") { input += ch; render(); }
       }
