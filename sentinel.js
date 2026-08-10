@@ -741,6 +741,7 @@ async function cli(args) {
     if (sub === "init") nexusInit();
     else if (sub === "run" || sub === "supervise" || sub === "loop") await nexusRun(rest.slice(1));
     else if (sub === "overnight") await nexusRun(["--overnight"].concat(rest.slice(1)));
+    else if (sub === "agents" || sub === "parallel") await nexusAgents(rest.slice(1));
     else await aiCoder(rest);
   }
   else usage();
@@ -1005,6 +1006,55 @@ function nexusRestore(cwd, tree) {
     return true;
   } catch (_) { return false; }
 }
+// ---------- MCP (Model Context Protocol): minimal dependency-free JSON-RPC-2.0 stdio client ----------
+function loadMcpConfig(cwd) {
+  const fs = require("fs"), path = require("path");
+  for (const f of [path.join(cwd, ".nexus", "mcp.json"), path.join(cwd, ".mcp.json")]) { try { const j = JSON.parse(fs.readFileSync(f, "utf8")); if (j && j.mcpServers && Object.keys(j.mcpServers).length) return j.mcpServers; } catch (_) {} }
+  return null;
+}
+function mcpConnect(name, spec, cwd) {
+  return new Promise((resolve) => {
+    let cp; try { cp = _cp.spawn(spec.command, spec.args || [], { cwd, env: Object.assign({}, process.env, spec.env || {}), stdio: ["pipe", "pipe", "ignore"] }); } catch (e) { return resolve({ name, error: e.message }); }
+    let buf = "", idc = 0; const pending = {};
+    cp.stdout.on("data", (d) => { buf += d.toString(); let nl; while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl); buf = buf.slice(nl + 1); if (!line.trim()) continue; let m; try { m = JSON.parse(line); } catch (_) { continue; } if (m.id != null && pending[m.id]) { pending[m.id](m); delete pending[m.id]; } } });
+    cp.on("error", () => {});
+    const call = (method, params) => new Promise((res, rej) => { const id = ++idc; pending[id] = (m) => m.error ? rej(new Error(m.error.message || "mcp error")) : res(m.result); try { cp.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: params || {} }) + "\n"); } catch (e) { return rej(e); } setTimeout(() => { if (pending[id]) { delete pending[id]; rej(new Error("mcp timeout")); } }, 20000); });
+    const notify = (method, params) => { try { cp.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params: params || {} }) + "\n"); } catch (_) {} };
+    (async () => {
+      try {
+        await call("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "nexus", version: "1.0" } });
+        notify("notifications/initialized", {});
+        const tl = await call("tools/list", {});
+        resolve({ name, cp, call, tools: (tl && tl.tools) || [] });
+      } catch (e) { try { cp.kill(); } catch (_) {} resolve({ name, error: e.message }); }
+    })();
+  });
+}
+// ---------- Hooks: run project-defined shell commands around events (Claude-Code style) ----------
+function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try { return JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "hooks.json"), "utf8")); } catch (_) { return null; } }
+function runHooks(hooks, event, env, cwd) {
+  const list = (hooks && hooks[event]) || [];
+  for (const h of list) {
+    if (h.matcher && env.TOOL_NAME && !(new RegExp(h.matcher).test(env.TOOL_NAME))) continue;
+    try { const r = _cp.spawnSync(h.command, { shell: true, cwd, env: Object.assign({}, process.env, env), encoding: "utf8", timeout: (h.timeout || 15) * 1000 }); if (r.status && r.status !== 0) return { block: true, out: ((r.stdout || "") + (r.stderr || "")).trim().slice(0, 400) }; } catch (_) {} }
+  return { block: false };
+}
+// ---------- Parallel sub-agents: fan a list of independent tasks out across the current engine ----------
+async function runSubagents(engine, tasks, cwd, model, onProgress) {
+  const results = new Array(tasks.length); let idx = 0;
+  const CONC = Math.max(1, Math.min(engine === "ollama" ? 1 : 4, tasks.length)); // ollama runs one model at a time
+  async function worker() {
+    while (idx < tasks.length) {
+      const i = idx++; if (onProgress) onProgress(i, "run");
+      let out;
+      try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", cwd); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], cwd, true); out = (r.output || "").trim(); } }
+      catch (e) { out = "error: " + e.message; }
+      results[i] = out; if (onProgress) onProgress(i, "done");
+    }
+  }
+  await Promise.all(Array.from({ length: CONC }, worker));
+  return results;
+}
 function extractJson(text, fallback) {
   const s = String(text || ""); const arr = s.match(/\[[\s\S]*\]/), obj = s.match(/\{[\s\S]*\}/);
   for (const m of [arr, obj]) if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
@@ -1067,6 +1117,25 @@ function nexusRunHelp() {
   console.log("        --resume          continue the last run in this folder (.nexus/run.json)");
   console.log("    -m, --model <name>    ollama model (ollama engine only)");
   console.log("\n  " + gray("Plan, progress and report live in ./.nexus/ (run.json, report.md, memory.md).") + "\n  " + gray("claude/opencode run with full autonomy (--dangerously-skip-permissions) — use in a trusted repo.") + "\n");
+}
+// `nexus agents "task1" "task2" …` — run independent tasks in parallel across the current engine.
+async function nexusAgents(argv) {
+  const fs = require("fs"), path = require("path");
+  const arr = (Array.isArray(argv) ? argv.slice() : [String(argv || "")]);
+  let engine = ""; const tasks = [];
+  for (let i = 0; i < arr.length; i++) { if (arr[i] === "-e" || arr[i] === "--engine") engine = arr[++i] || ""; else tasks.push(arr[i]); }
+  const cwd = process.cwd();
+  if (!tasks.length) { banner(); console.log("  " + bold("Nexus agents") + " — run independent tasks in parallel\n\n  " + gray("usage: ") + cyan("sentinel nexus agents \"add tests\" \"write docs\" \"fix lint\"") + gray("  [-e claude|ollama|opencode]") + "\n"); return; }
+  let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "config.json"), "utf8")); } catch (_) {}
+  engine = engine || cfg.engine || (hasBin("claude") ? "claude" : "ollama");
+  let model = cfg.model || process.env.SENTINEL_MODEL || "";
+  if (engine === "ollama" && !model) { const ms = await ollamaTags(); model = pickCoderModel(ms); }
+  banner(); console.log("  " + bold(tasks.length + " agents") + gray("  ·  engine " + engine + (model ? " (" + model + ")" : "")) + "\n");
+  tasks.forEach((t, i) => console.log("  " + cyan("agent " + (i + 1)) + gray("  " + t)));
+  console.log("");
+  const outs = await runSubagents(engine, tasks, cwd, model, (i, phase) => { if (phase === "run") console.log("  " + yellow("▶ agent " + (i + 1) + " started")); else console.log("  " + green("+ agent " + (i + 1) + " done")); });
+  console.log("");
+  outs.forEach((o, i) => { console.log("  " + bold(cyan("── agent " + (i + 1) + " ── ")) + gray(tasks[i])); console.log(gray("  " + String(o || "(no output)").replace(/\n/g, "\n  ")) + "\n"); });
 }
 async function nexusRun(argv) {
   const fs = require("fs"), path = require("path");
@@ -1223,7 +1292,9 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/undo", "revert the last turn's file changes"], ["/rewind", "restore a specific checkpoint (/rewind N)"], ["/checkpoints", "list undo checkpoints"],
       ["/resume", "reload the last saved session"], ["/export", "save the conversation to a markdown file"], ["/copy", "copy the last reply to the clipboard"],
       ["/status", "session engine, model, tokens & cost"], ["/doctor", "check engines & tools are available"], ["/init", "scaffold .nexus/ in this project"],
-      ["/model", "show or set the model"], ["/engine", "switch claude | opencode | ollama"], ["/commands", "list custom project commands"], ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
+      ["/model", "show or set the model"], ["/engine", "switch claude | opencode | ollama"], ["/commands", "list custom project commands"],
+      ["/agents", "run tasks in parallel: /agents a ;; b ;; c"], ["/mcp", "list / connect MCP servers"], ["/hooks", "show configured tool hooks"],
+      ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
     // Custom project slash commands (Claude-Code / Glitch style): each .md file in
     // .nexus/commands/ or .claude/commands/ becomes /<name>; its body is the prompt,
@@ -1233,6 +1304,10 @@ function nexusTui(engine, cwd, nexusMd) {
       try { for (const f of fs.readdirSync(dir)) { if (!/\.md$/.test(f)) continue; const nm = "/" + f.replace(/\.md$/, ""); if (customCmds[nm]) continue; const body = fs.readFileSync(path.join(dir, f), "utf8"); const desc = ((body.split("\n").find((l) => l.trim()) || "custom command").replace(/^#+\s*/, "") + " (custom)").slice(0, 52); customCmds[nm] = { body, desc }; } } catch (_) {}
     }
     const allCmds = () => CMDS.concat(Object.keys(customCmds).map((k) => [k, customCmds[k].desc]));
+    // ---- MCP servers + hooks (loaded from .nexus/) ----
+    const hooks = loadHooks(cwd);
+    let mcpServers = []; // connected { name, call, tools } (or { name, error })
+    const mcpToolList = () => mcpServers.filter((s) => !s.error).flatMap((s) => (s.tools || []).map((t) => ({ full: "mcp__" + s.name + "__" + t.name, srv: s, name: t.name, desc: t.description || "" })));
     // ---- inline markdown / command coloring ----
     const paintCode = (c) => (/(^|\s)(node|npm|npx|git|python3?|pip3?|bash|sh|cd|ls|cat|make|cargo|go|docker|curl|grep|sed|rm|mkdir|chmod|sudo)\b/.test(c) || /\s--?\w/.test(c)) ? blue(c) : mag(c);
     const colorMd = (line, inCode) => { if (inCode) return blue(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => paintCode(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
@@ -1375,6 +1450,7 @@ function nexusTui(engine, cwd, nexusMd) {
     // ---- engine turn ----
     const submit = (text) => {
       if (costCap && sess.cost >= costCap) { transcript.push({ role: "system", text: "budget reached ($" + sess.cost.toFixed(4) + " ≥ cap $" + costCap.toFixed(2) + ") — raise it with /budget <amount> to continue" }); render(); return; }
+      if (hooks) { const hr = runHooks(hooks, "UserPromptSubmit", { NEXUS_ENGINE: engine, NEXUS_PROMPT: text }, cwd); if (hr.block) { transcript.push({ role: "user", text }); transcript.push({ role: "system", text: "blocked by UserPromptSubmit hook" + (hr.out ? ": " + hr.out : "") }); render(); return; } }
       history.push(text); hIdx = history.length; scroll = 0;
       transcript.push({ role: "user", text });
       const sendText = inlineAts(text);
@@ -1403,6 +1479,7 @@ function nexusTui(engine, cwd, nexusMd) {
         cont = true; busy = false; if (costCap && sess.cost >= costCap) transcript.push({ role: "system", text: "budget cap reached ($" + sess.cost.toFixed(4) + ") — /budget <amount> to raise" });
         if (!warned50 && sess.ctxUsed > 0.5 * (sess.ctxWindow || 200000)) { warned50 = true; transcript.push({ role: "system", text: "context is over 50% — quality can dip on very long sessions; use /compact or /clear when it makes sense" }); }
         try { saveSession(); } catch (_) {}
+        if (hooks) try { runHooks(hooks, "Stop", { NEXUS_ENGINE: engine }, cwd); } catch (_) {}
         maybeAutoCompact(); render();
       };
       if (engine === "claude") {
@@ -1437,10 +1514,12 @@ function nexusTui(engine, cwd, nexusMd) {
         runEngineTask("opencode", promptText, cwd, true, cont, (chunk) => { ensureText().full += chunk; sess.liveOut += Math.ceil(chunk.length / 4); render(); })
           .then((res) => { sess.inTok += Math.ceil(promptText.length / 4); sess.outTok += Math.ceil((res.output || "").length / 4); sess.ctxUsed = sess.inTok + sess.outTok; finish(res); });
       } else { // ollama — LOCAL agent with full device access (read/write/edit/list/run_command)
-        if (oMsgs.length === 1) oMsgs[0].content = "You are Nexus, a local autonomous coding agent on the operator's own machine (cwd " + cwd + "). Accomplish the TASK by taking ONE action per step and reading each OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace}, list_dir{path?}, run_command{command}. run_command has full shell access. Reply with exactly ONE JSON object: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Keep going until the task is fully done." + (nexusMd ? "\n\nPROJECT (.nexus/NEXUS.md):\n" + nexusMd.slice(0, 4000) : "");
+        const mcps = mcpToolList();
+        const extra = (mcps.length ? " MCP tools: " + mcps.map((m) => m.full + " — " + oneline(m.desc, 40)).join("; ") + "." : "") + " spawn_agents{tasks:[\"...\",\"...\"]} runs several INDEPENDENT sub-tasks in parallel via sub-agents and returns all their results — use it to split big work.";
+        if (oMsgs.length === 1) oMsgs[0].content = "You are Nexus, a local autonomous coding agent on the operator's own machine (cwd " + cwd + "). Accomplish the TASK by taking ONE action per step and reading each OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace}, list_dir{path?}, run_command{command}. run_command has full shell access." + extra + " Reply with exactly ONE JSON object: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Keep going until the task is fully done." + (nexusMd ? "\n\nPROJECT (.nexus/NEXUS.md):\n" + nexusMd.slice(0, 4000) : "");
         oMsgs.push({ role: "user", content: promptText });
         sess.inTok += Math.ceil(promptText.length / 4);
-        const olbl = (n, a) => n === "read_file" ? "Read(" + base(a.path) + ")" : n === "write_file" ? "Write(" + base(a.path) + ")" : n === "edit_file" ? "Update(" + base(a.path) + ")" : n === "run_command" ? "Bash(" + oneline(a.command, 40) + ")" : n === "list_dir" ? "List(" + (a.path || ".") + ")" : n + "()";
+        const olbl = (n, a) => n === "read_file" ? "Read(" + base(a.path) + ")" : n === "write_file" ? "Write(" + base(a.path) + ")" : n === "edit_file" ? "Update(" + base(a.path) + ")" : n === "run_command" ? "Bash(" + oneline(a.command, 40) + ")" : n === "list_dir" ? "List(" + (a.path || ".") + ")" : n === "spawn_agents" ? "Task(" + ((a.tasks || []).length) + " agents)" : String(n).startsWith("mcp__") ? String(n).replace(/^mcp__/, "").replace("__", ":") + "()" : n + "()";
         (async () => {
           let mdl = process.env.SENTINEL_MODEL || (sess.model && sess.model !== engine ? sess.model : "");
           if (!mdl) { mdl = pickCoderModel(await ollamaTags()); }
@@ -1459,19 +1538,25 @@ function nexusTui(engine, cwd, nexusMd) {
             const card = { type: "tool", id: "o" + step, name, label: olbl(name, a), status: "run", start: Date.now(), detail: JSON.stringify(a).slice(0, 400) };
             block.items.push(card);
             if (name === "run_command") { runningShells++; stat.cmds++; }
+            if (name === "spawn_agents") activeAgents += (a.tasks || []).length;
             if (["write_file", "edit_file"].includes(name) && a.path) stat.files.add(base(a.path));
             render();
-            let result;
-            try {
+            let result, blocked = false;
+            if (hooks) { const hr = runHooks(hooks, "PreToolUse", { TOOL_NAME: name, TOOL_ARGS: JSON.stringify(a) }, cwd); if (hr.block) { result = { error: "blocked by PreToolUse hook" + (hr.out ? ": " + hr.out : "") }; blocked = true; } }
+            if (!blocked) try {
               if (name === "read_file") result = { content: fs.readFileSync(path.resolve(cwd, a.path), "utf8").slice(0, 14000) };
               else if (name === "list_dir") result = { items: fs.readdirSync(path.resolve(cwd, a.path || "."), { withFileTypes: true }).map((e) => e.isDirectory() ? e.name + "/" : e.name).slice(0, 200) };
               else if (name === "write_file") { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; }
               else if (name === "edit_file") { const fp = path.resolve(cwd, a.path); const t = fs.readFileSync(fp, "utf8"); if (!t.includes(a.find)) result = { error: "find string not present" }; else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; } }
               else if (name === "run_command") { const r = await coderShell(a.command, cwd); result = { code: r.code, output: (r.output || "").slice(0, 4000) }; }
+              else if (name === "spawn_agents") { const tasks = (a.tasks || []).map(String).filter(Boolean).slice(0, 8); const outs = await runSubagents(engine, tasks, cwd, mdl); result = { agents: outs.map((o2, i) => ({ task: tasks[i], result: (o2 || "").slice(0, 1500) })) }; }
+              else if (String(name).startsWith("mcp__")) { const srv = mcpServers.find((s) => !s.error && String(name).slice(5).startsWith(s.name + "__")); if (!srv) result = { error: "MCP tool not connected: " + name }; else { const tool = String(name).slice(5 + srv.name.length + 2); const r = await srv.call("tools/call", { name: tool, arguments: a }); result = { content: resultText((r && r.content) || r) }; } }
               else result = { error: "unknown tool " + name };
             } catch (e) { result = { error: e.message }; }
-            if (["read_file", "write_file", "edit_file", "list_dir", "run_command"].includes(name)) didTool = true;
+            if (["read_file", "write_file", "edit_file", "list_dir", "run_command", "spawn_agents"].includes(name) || String(name).startsWith("mcp__")) didTool = true;
             if (name === "run_command" && runningShells) runningShells--;
+            if (name === "spawn_agents") activeAgents = Math.max(0, activeAgents - (a.tasks || []).length);
+            if (hooks && !blocked) try { runHooks(hooks, "PostToolUse", { TOOL_NAME: name, TOOL_ARGS: JSON.stringify(a), TOOL_RESULT: JSON.stringify(result).slice(0, 2000) }, cwd); } catch (_) {}
             card.status = result.error ? "err" : "ok"; card.end = Date.now(); card.detail = oneline(resultText(JSON.stringify(result)), 260);
             const obs = JSON.stringify(result).slice(0, 14000);
             oMsgs.push({ role: "tool", content: obs }); sess.inTok += Math.ceil(obs.length / 4);
@@ -1482,6 +1567,29 @@ function nexusTui(engine, cwd, nexusMd) {
         })();
       }
     };
+    // ---- parallel sub-agents: fan a set of independent tasks across the current engine ----
+    const spawnAgents = (tasks) => {
+      tasks = tasks.map((s) => s.trim()).filter(Boolean).slice(0, 8);
+      transcript.push({ role: "user", text: "/agents  " + tasks.join("  ;;  ") });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      const t0 = Date.now(), in0 = sess.inTok, out0 = sess.outTok; scroll = 0;
+      busy = true; busyStart = Date.now(); busyWord = "Orchestrating"; sess.liveOut = 0;
+      ctl = { stopped: false, kill() { this.stopped = true; } };
+      activeAgents = tasks.length;
+      const cards = tasks.map((tk, i) => ({ type: "tool", id: "ag" + i, name: "Task", label: "Task(" + oneline(tk, 30) + ")", status: "run", start: Date.now(), detail: tk }));
+      cards.forEach((c) => block.items.push(c));
+      startTick(); render();
+      runSubagents(engine, tasks, cwd, sess.model, (i, phase) => { if (phase === "done") { cards[i].status = "ok"; cards[i].end = Date.now(); activeAgents = Math.max(0, activeAgents - 1); } render(); })
+        .then((outs) => {
+          const t = ensureText();
+          t.full = outs.map((o, i) => "### agent " + (i + 1) + " — " + oneline(tasks[i], 60) + "\n" + (o || "(no output)")).join("\n\n");
+          for (const c of cards) if (c.status === "run") { c.status = "ok"; c.end = Date.now(); }
+          sess.outTok += Math.ceil(outs.join("").length / 4); sess.ctxUsed = sess.inTok + sess.outTok;
+          activeAgents = 0; busy = false; ctl = null;
+          block.summary = tasks.length + " agents  ·  ↑" + fmtK(sess.inTok - in0) + " ↓" + fmtK(sess.outTok - out0) + " tok  ·  " + ((Date.now() - t0) / 1000).toFixed(1) + "s";
+          try { saveSession(); } catch (_) {} render();
+        });
+    };
     // ---- slash commands ----
     const saveSession = () => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "session.json"), JSON.stringify({ engine, model: sess.model, transcript, sess, ts: Date.now() })); } catch (_) {} };
     const handleSlash = (t) => {
@@ -1490,8 +1598,15 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help /clear /compact /context /cost /budget /undo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\ninput:  @file inlines a file (Tab completes paths) · !cmd runs a shell command · #note saves to NEXUS.md · end a line with \\ for a new line\nkeys:  shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / for the command menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help /clear /compact /context /cost /budget /undo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /agents /mcp /hooks /expand /exit\ninput:  @file inlines a file (Tab completes paths) · !cmd runs a shell command · #note saves to NEXUS.md · end a line with \\ for a new line\nparallel:  /agents <task> ;; <task> ;; …   ·   MCP tools & project /hooks load from .nexus/\nkeys:  shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / for the command menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
+      else if (cmd === "/mcp") {
+        if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
+        else if (!loadMcpConfig(cwd)) transcript.push({ role: "system", text: "no MCP servers configured. Create .nexus/mcp.json (or .mcp.json):\n  { \"mcpServers\": { \"name\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-...\"] } } }\nThe claude engine reads .mcp.json natively; the local engine gets these tools too." });
+        else if (!mcpServers.length) transcript.push({ role: "system", text: "MCP servers are still connecting… run /mcp again in a moment" });
+        else transcript.push({ role: "system", text: "MCP servers:\n" + mcpServers.map((s) => s.error ? ("  " + s.name + "  — error: " + s.error) : ("  " + s.name + "  — " + (s.tools || []).length + " tool(s): " + (s.tools || []).map((t) => t.name).slice(0, 8).join(", "))).join("\n") + "\nthe local engine can call these as mcp__<server>__<tool>" }); }
+      else if (cmd === "/agents" || cmd === "/parallel") { const tasks = argstr.split(/\s*;;\s*/).map((s) => s.trim()).filter(Boolean); if (tasks.length < 2) transcript.push({ role: "system", text: "usage: /agents <task 1> ;; <task 2> ;; …   — runs each independent task in parallel via sub-agents on the " + engine + " engine" }); else spawnAgents(tasks); }
+      else if (cmd === "/hooks") { transcript.push({ role: "system", text: hooks ? ("hooks (.nexus/hooks.json) active for events: " + Object.keys(hooks).join(", ") + "\n  PreToolUse/PostToolUse run for the local engine; UserPromptSubmit & Stop run for every engine") : "no hooks configured. Create .nexus/hooks.json:\n  { \"PreToolUse\": [ { \"matcher\": \"run_command|write_file\", \"command\": \"echo $TOOL_NAME >> .nexus/audit.log\" } ] }\n  events: UserPromptSubmit · PreToolUse · PostToolUse · Stop  (non-zero exit on PreToolUse/UserPromptSubmit blocks the action)" }); }
       else if (cmd === "/status") transcript.push({ role: "system", text: "status:\n  engine   " + engine + (sess.model && sess.model !== engine ? " (" + sess.model + ")" : "") + "\n  dir      " + cwd + "\n  mode     " + MODES[mode].k + "\n  context  " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "% of " + fmtK(sess.ctxWindow) + "\n  tokens   ↑" + fmtK(sess.inTok) + " ↓" + fmtK(sess.outTok) + (PAID[engine] ? (sess.cost ? " · $" + sess.cost.toFixed(4) : " · billed") : " · local · free") + "\n  budget   " + (costCap ? "$" + costCap.toFixed(2) + " cap" : "none") + "\n  undo     " + checkpoints.length + " checkpoint(s)" });
       else if (cmd === "/doctor") transcript.push({ role: "system", text: "doctor:\n  claude CLI   " + (hasBin("claude") ? "found" : "not found (needed for the claude engine)") + "\n  opencode     " + (hasBin("opencode") ? "found" : "not found") + "\n  git          " + (hasBin("git") ? "found — /undo & checkpoints active" : "not found — /undo disabled") + "\n  node         " + process.version + "\n  ollama is checked live when you switch to it" });
       else if (cmd === "/resume") { try { const s = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "session.json"), "utf8")); transcript.length = 0; for (const b of s.transcript) transcript.push(b); if (s.sess) Object.assign(sess, s.sess); cont = true; scroll = 0; transcript.push({ role: "system", text: "resumed the saved session from " + new Date(s.ts).toLocaleString() }); } catch (_) { transcript.push({ role: "system", text: "no saved session to resume (sessions are saved to .nexus/session.json after each turn)" }); } }
@@ -1516,6 +1631,9 @@ function nexusTui(engine, cwd, nexusMd) {
     try { process.stdin.setRawMode(true); } catch (_) {}
     process.stdin.resume(); process.stdin.setEncoding("utf8");
     let loading = true;
+    // auto-connect MCP servers defined in .nexus/mcp.json (non-blocking)
+    const connectMcp = async () => { const cfg = loadMcpConfig(cwd); if (!cfg) return; for (const nm of Object.keys(cfg)) { const c = await mcpConnect(nm, cfg[nm], cwd); mcpServers.push(c); if (!loading) render(); } };
+    connectMcp();
     process.stdin.on("data", (d) => {
       if (loading) return;
       const s = String(d);
