@@ -19,6 +19,7 @@ const VERSION = "2.29.0";
 
 // ---------- colors ----------
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
+let tuiActive = false; // set while the full-screen TUI owns the terminal, so the global SIGINT handler defers to the TUI's own cleanup
 const A = { reset: "\x1b[0m", b: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", green: "\x1b[32m", red: "\x1b[31m", yellow: "\x1b[33m", mag: "\x1b[35m", gray: "\x1b[90m", blue: "\x1b[34m" };
 const p = (code, s) => (useColor ? code + s + A.reset : s);
 const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
@@ -748,11 +749,11 @@ async function cli(args) {
 }
 
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
-function ollamaChat(model, messages, format) {
+function ollamaChat(model, messages, format, signal) {
   return new Promise((resolve, reject) => {
     const HOST = process.env.OLLAMA_HOST || "127.0.0.1", PORT = +(process.env.OLLAMA_PORT || 11434);
     const body = JSON.stringify({ model, stream: false, format, keep_alive: "30m", options: { temperature: 0.2, num_ctx: 16384 }, messages });
-    const req = http.request({ host: HOST, port: PORT, path: "/api/chat", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+    const req = http.request({ host: HOST, port: PORT, path: "/api/chat", method: "POST", signal, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
       (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { try { resolve(JSON.parse(d).message.content || ""); } catch (e) { reject(new Error("bad model response")); } }); });
     req.setTimeout(+(process.env.OLLAMA_TIMEOUT || 300000), () => { req.destroy(new Error("Ollama timed out (no response) — is the model stuck loading?")); }); // prevent a wedged request from hanging the turn forever
     req.on("error", (e) => reject(new Error("cannot reach Ollama at " + HOST + ":" + PORT + " — is it running? (" + e.message + ")"))); req.write(body); req.end();
@@ -926,7 +927,7 @@ const _cp = require("child_process");
 function hasBin(b) { try { const r = _cp.spawnSync(b, ["--version"], { timeout: 6000 }); return !r.error; } catch (_) { return false; } }
 
 // Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
-function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk) {
+function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk, ctl) {
   return new Promise((resolve) => {
     let cmd, args;
     if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (cont) args.push("--continue"); if (autonomous) args.push("--dangerously-skip-permissions"); }
@@ -934,6 +935,7 @@ function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk) {
     else return resolve({ ok: false, output: "unknown engine: " + engine });
     let out = "";
     const p = _cp.spawn(cmd, args, { cwd, env: process.env });
+    if (ctl && ctl.kids) ctl.kids.push(() => { try { p.kill("SIGINT"); } catch (_) {} setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} }, 1200); }); // let ctrl+c kill this child
     try { p.stdin.end(); } catch (_) {} // signal EOF so the CLI doesn't wait on stdin
     p.stdout.on("data", (d) => { const s = d.toString(); out += s; if (onChunk) onChunk(s); else process.stdout.write(gray("    " + s.replace(/\n/g, "\n    "))); });
     p.stderr.on("data", (d) => (out += d.toString()));
@@ -1054,7 +1056,7 @@ function runHooks(hooks, event, env, cwd) {
   return { block: false };
 }
 // ---------- Parallel sub-agents: fan a list of independent tasks out across the current engine ----------
-async function runSubagents(engine, tasks, cwd, model, onProgress) {
+async function runSubagents(engine, tasks, cwd, model, onProgress, ctl) {
   const path = require("path"), fs = require("fs"), os = require("os");
   const results = new Array(tasks.length);
   // Isolate each concurrent agent in its own git worktree so parallel writers can't
@@ -1067,11 +1069,12 @@ async function runSubagents(engine, tasks, cwd, model, onProgress) {
   const stamp = Date.now().toString(36);
   const removeWt = (wt) => { try { _cp.execSync("git worktree remove --force " + JSON.stringify(wt), { cwd, stdio: "ignore" }); } catch (_) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch (__) {} } };
   const runOne = async (i) => {
+    if (ctl && ctl.stopped) { results[i] = "(interrupted)"; if (onProgress) onProgress(i, "done"); return; }
     if (onProgress) onProgress(i, "run");
     let dir = cwd;
     if (useWt) { const wt = path.join(os.tmpdir(), "nexus-agent-" + stamp + "-" + i); try { _cp.execSync("git worktree add --detach " + JSON.stringify(wt) + " " + baseCommit, { cwd, stdio: "ignore" }); worktrees[i] = dir = wt; } catch (_) { dir = cwd; } }
     let out;
-    try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", dir); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], dir, true); out = (r.output || "").trim(); } }
+    try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", dir); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], dir, true, false, null, ctl); out = (r.output || "").trim(); } }
     catch (e) { out = "error: " + e.message; }
     results[i] = out; if (onProgress) onProgress(i, "done");
   };
@@ -1366,11 +1369,14 @@ function nexusTui(engine, cwd, nexusMd) {
     const history = []; let hIdx = -1;
     let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false, redact = false; // interruption, budget, rate-limit, paste, bell, cloud redaction
     const checkpoints = [], redoStack = [], pinned = new Set();       // { tree, label, ts }; pinned = sticky context files
+    // interrupt controller: .stopped is polled by loops; .kids are killers (child procs / aborts) fired on ctrl+c
+    const makeCtl = () => ({ stopped: false, kids: [], kill() { this.stopped = true; for (const k of this.kids.splice(0)) { try { k(); } catch (_) {} } } });
+    const aSignal = (c) => { const ac = new AbortController(); if (c && c.kids) c.kids.push(() => { try { ac.abort(); } catch (_) {} }); return ac.signal; };
     const fs = require("fs"), path = require("path");
     // @path inlines a file's contents into the prompt sent to the engine (display keeps the @mention)
     const inlineAts = (t) => t.replace(/(^|\s)@(\S+)/g, (m, pre, f) => { try { const c = fs.readFileSync(path.resolve(cwd, f), "utf8"); return pre + "\n\n--- " + f + " ---\n" + c.slice(0, 12000) + "\n--- end " + f + " ---\n"; } catch (_) { return m; } });
     // !cmd runs a shell command directly (Claude-Code-style passthrough); output shown inline
-    const runBang = (c) => { const blk = { role: "system", text: "$ " + c + "\nrunning…" }; transcript.push(blk); busy = true; ctl = { stopped: false, kill() { this.stopped = true; } }; scroll = 0; render(); coderShell(c, cwd).then((r) => { const o = (r.output || "").replace(/[ \t\r\n]+$/, ""); blk.text = "$ " + c + "\n" + (o || "(no output)") + (r.code ? "\n[exit " + r.code + "]" : ""); busy = false; ctl = null; render(); }); };
+    const runBang = (c) => { const blk = { role: "system", text: "$ " + c + "\nrunning…" }; transcript.push(blk); busy = true; ctl = makeCtl(); scroll = 0; render(); coderShell(c, cwd).then((r) => { const o = (r.output || "").replace(/[ \t\r\n]+$/, ""); blk.text = "$ " + c + "\n" + (o || "(no output)") + (r.code ? "\n[exit " + r.code + "]" : ""); busy = false; ctl = null; render(); }); };
     // #note appends a durable memory to .nexus/NEXUS.md
     const addMemory = (line) => { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"); let c = ""; try { c = fs.readFileSync(md, "utf8"); } catch (_) {} if (!/\n##\s*Notes/.test(c)) c += (c && !c.endsWith("\n") ? "\n" : "") + "\n## Notes\n"; c += "- " + line + "\n"; fs.writeFileSync(md, c); transcript.push({ role: "system", text: "remembered → .nexus/NEXUS.md: " + line }); } catch (e) { transcript.push({ role: "system", text: "could not save note: " + e.message }); } };
     // ---- ansi-aware width helpers ----
@@ -1419,7 +1425,7 @@ function nexusTui(engine, cwd, nexusMd) {
     // ---- inline markdown / command coloring ----
     const paintCode = (c) => (/(^|\s)(node|npm|npx|git|python3?|pip3?|bash|sh|cd|ls|cat|make|cargo|go|docker|curl|grep|sed|rm|mkdir|chmod|sudo)\b/.test(c) || /\s--?\w/.test(c)) ? blue(c) : mag(c);
     const colorMd = (line, inCode) => { if (inCode) return blue(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => paintCode(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
-    const wrap = (text) => { const width = cols() - 4; const res = []; for (const para of String(text).replace(/\r/g, "").split("\n")) { let s = para; if (!s.length) { res.push(""); continue; } while (s.length > width) { res.push(s.slice(0, width)); s = s.slice(width); } res.push(s); } return res; };
+    const wrap = (text) => { const width = cols() - 4; const res = []; for (const para of String(text).replace(/\r/g, "").split("\n")) { let s = para; if (!s.length) { res.push(""); continue; } while (s.length > width) { let w = width; const cc = s.charCodeAt(w - 1); if (cc >= 0xD800 && cc <= 0xDBFF) w = Math.max(1, w - 1); res.push(s.slice(0, w)); s = s.slice(w); } res.push(s); } return res; };
     // ---- tool-card labels (Claude-Code style) ----
     const toolLabel = (name, a) => {
       a = a || {};
@@ -1538,7 +1544,7 @@ function nexusTui(engine, cwd, nexusMd) {
     };
     // ---- animation loop: typewriter reveal + spinners + elapsed ----
     const revealing = () => { const b = cur(); if (!b || !b.items) return false; return b.items.some((it) => it.type === "text" && it.shown < it.full.length); };
-    const startTick = () => { if (tick) return; tick = setInterval(() => { const b = cur(); if (b && b.items) for (const it of b.items) if (it.type === "text" && it.shown < it.full.length) it.shown = Math.min(it.full.length, it.shown + Math.max(2, Math.ceil((it.full.length - it.shown) / 22))); render(); if (!busy && !revealing() && !compact.on) { clearInterval(tick); tick = null; } }, 45); };
+    const startTick = () => { if (tick) return; tick = setInterval(() => { const b = cur(); if (b && b.items) for (const it of b.items) if (it.type === "text" && it.shown < it.full.length) { let ns = Math.min(it.full.length, it.shown + Math.max(2, Math.ceil((it.full.length - it.shown) / 22))); const cc = it.full.charCodeAt(ns - 1); if (cc >= 0xD800 && cc <= 0xDBFF && ns < it.full.length) ns++; it.shown = ns; } render(); if (!busy && !revealing() && !compact.on) { clearInterval(tick); tick = null; } }, 45); };
     // ---- context compaction (visual + local prune) ----
     const doCompact = (auto) => {
       if (compact.on) return;
@@ -1561,9 +1567,11 @@ function nexusTui(engine, cwd, nexusMd) {
     const maybeAutoCompact = () => { if (!PAID[engine] && sess.ctxUsed > 0.8 * (sess.ctxWindow || 200000) && !compact.on) doCompact(true); }; // claude self-compacts server-side; only auto-compact the local engine
     const onResize = () => { if (!loading) render(); };
     let cleaned = false;
-    const cleanup = () => { if (cleaned) return; cleaned = true; if (tick) { clearInterval(tick); tick = null; } if (compact.iv) { clearInterval(compact.iv); compact.iv = null; } if (ctl && ctl.kill) try { ctl.kill(); } catch (_) {} for (const s of mcpServers) { try { s.cp && s.cp.kill(); } catch (_) {} } try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.removeListener("resize", onResize); process.removeListener("exit", cleanup); process.removeListener("SIGTERM", onFatal); process.removeListener("uncaughtException", onFatal); out.write(ESC + "[?2004l" + ESC + "[?1000l" + ESC + "[?1006l" + ESC + "[?25h" + ESC + "[?1049l"); };
-    const onFatal = (e) => { try { cleanup(); } catch (_) {} if (e && e instanceof Error) { try { process.stderr.write("\nNexus exited on error: " + e.message + "\n"); } catch (_) {} } try { resolve(); } catch (_) {} };
-    process.on("exit", cleanup); process.on("SIGTERM", onFatal); process.on("uncaughtException", onFatal);
+    const cleanup = () => { if (cleaned) return; cleaned = true; tuiActive = false; if (tick) { clearInterval(tick); tick = null; } if (compact.iv) { clearInterval(compact.iv); compact.iv = null; } if (ctl && ctl.kill) try { ctl.kill(); } catch (_) {} for (const s of mcpServers) { try { s.cp && s.cp.kill(); } catch (_) {} } try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.removeListener("resize", onResize); process.removeListener("exit", cleanup); process.removeListener("SIGINT", onSigint); process.removeListener("SIGTERM", onSigterm); process.removeListener("uncaughtException", onFatal); out.write(ESC + "[?2004l" + ESC + "[?1000l" + ESC + "[?1006l" + ESC + "[?25h" + ESC + "[?1049l"); };
+    tuiActive = true;
+    const onFatal = (e) => { const sig = e === "SIGINT" || e === "SIGTERM"; try { cleanup(); } catch (_) {} if (e && e instanceof Error) { try { process.stderr.write("\nNexus exited on error: " + e.message + "\n"); } catch (_) {} } try { resolve(); } catch (_) {} if (sig) process.exit(0); };
+    const onSigint = () => onFatal("SIGINT"), onSigterm = () => onFatal("SIGTERM");
+    process.on("exit", cleanup); process.on("SIGINT", onSigint); process.on("SIGTERM", onSigterm); process.on("uncaughtException", onFatal);
     // ---- engine turn ----
     const submit = (text) => {
       if (costCap && sess.cost >= costCap) { transcript.push({ role: "system", text: "budget reached ($" + sess.cost.toFixed(4) + " ≥ cap $" + costCap.toFixed(2) + ") — raise it with /budget <amount> to continue" }); render(); return; }
@@ -1580,7 +1588,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const ckTree = nexusCheckpoint(cwd); // every engine can now modify files, so always checkpoint (null if not a git repo)
       let ckObj = null; if (ckTree) { ckObj = { tree: ckTree, label: oneline(text, 40), ts: Date.now() }; checkpoints.push(ckObj); }
       busy = true; busyStart = Date.now(); busyWord = FORGE[Math.floor(Math.random() * FORGE.length)]; sess.liveOut = 0;
-      ctl = { stopped: false, kill() { this.stopped = true; } }; // local engine checks .stopped; claude overrides .kill with a process kill
+      ctl = makeCtl(); // local engine checks .stopped; claude overrides .kill with a process kill
       startTick(); render();
       const finish = (res) => {
         for (const it of block.items) if (it.type === "tool" && it.status === "run") { it.status = res && res.interrupted ? "err" : "ok"; it.end = Date.now(); }
@@ -1649,7 +1657,7 @@ function nexusTui(engine, cwd, nexusMd) {
           let didTool = false, nudges = 0;
           for (let step = 1; step <= 30; step++) {
             if (ctl && ctl.stopped) { ensureText().full += (ensureText().full.trim() ? "\n" : "") + "(interrupted)"; break; }
-            let raw; try { raw = await ollamaChat(mdl, oMsgs, CODER_SCHEMA); } catch (e) { ensureText().full += "\nmodel error: " + e.message; break; }
+            let raw; try { raw = await ollamaChat(mdl, oMsgs, CODER_SCHEMA, aSignal(ctl)); } catch (e) { if (ctl && ctl.stopped) break; ensureText().full += "\nmodel error: " + e.message; break; }
             sess.outTok += Math.ceil(raw.length / 4); sess.liveOut += Math.ceil(raw.length / 4);
             let o; try { o = JSON.parse(raw); } catch (_) { oMsgs.push({ role: "tool", content: "Reply with valid schema JSON only." }); continue; }
             oMsgs.push({ role: "assistant", content: raw });
@@ -1671,7 +1679,7 @@ function nexusTui(engine, cwd, nexusMd) {
               else if (name === "write_file") { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); const sec = scanSecrets(a.content); result = sec.length ? { ok: true, warning: "Nexus flagged possible secret(s) in this file: " + sec.join(", ") + " — review before committing" } : { ok: true }; if (sec.length) transcript.push({ role: "system", text: "security warning: " + a.path + " may contain " + sec.join(", ") + " — Nexus wrote it but flagged it" }); }
               else if (name === "edit_file") { const fp = path.resolve(cwd, a.path); const t = fs.readFileSync(fp, "utf8"); if (!t.includes(a.find)) result = { error: "find string not present" }; else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; } }
               else if (name === "run_command") { const r = await coderShell(a.command, cwd); result = { code: r.code, output: (r.output || "").slice(0, 4000) }; }
-              else if (name === "spawn_agents") { const tasks = (a.tasks || []).map(String).filter(Boolean).slice(0, 8); const outs = await runSubagents(engine, tasks, cwd, mdl); result = { agents: outs.map((o2, i) => ({ task: tasks[i], result: (o2 || "").slice(0, 1500) })) }; }
+              else if (name === "spawn_agents") { const tasks = (a.tasks || []).map(String).filter(Boolean).slice(0, 8); const outs = await runSubagents(engine, tasks, cwd, mdl, null, ctl); result = { agents: outs.map((o2, i) => ({ task: tasks[i], result: (o2 || "").slice(0, 1500) })) }; }
               else if (String(name).startsWith("mcp__")) { const srv = mcpServers.find((s) => !s.error && String(name).slice(5).startsWith(s.name + "__")); if (!srv) result = { error: "MCP tool not connected: " + name }; else { const tool = String(name).slice(5 + srv.name.length + 2); const r = await srv.call("tools/call", { name: tool, arguments: a }); result = { content: resultText((r && r.content) || r) }; } }
               else { const dr = await deviceTool(name, a, cwd); result = dr !== null ? dr : { error: "unknown tool " + name }; if (dr !== null && ["move", "copy", "copy_file", "move_file", "rename", "make_dir", "mkdir", "delete", "delete_file", "rm"].includes(name) && (a.path || a.to || a.dest)) { const fp = a.to || a.dest || a.path; stat.files.add(base(fp)); const r = relOf(fp); if (r) stat.paths.add(r); } }
             } catch (e) { result = { error: e.message }; }
@@ -1696,12 +1704,12 @@ function nexusTui(engine, cwd, nexusMd) {
       const block = { role: "nexus", items: [] }; transcript.push(block);
       const t0 = Date.now(), in0 = sess.inTok, out0 = sess.outTok; scroll = 0;
       busy = true; busyStart = Date.now(); busyWord = "Orchestrating"; sess.liveOut = 0;
-      ctl = { stopped: false, kill() { this.stopped = true; } };
+      ctl = makeCtl();
       activeAgents = tasks.length;
       const cards = tasks.map((tk, i) => ({ type: "tool", id: "ag" + i, name: "Task", label: "Task(" + oneline(tk, 30) + ")", status: "run", start: Date.now(), detail: tk }));
       cards.forEach((c) => block.items.push(c));
       startTick(); render();
-      (async () => { const mdl = engine === "ollama" ? (sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags())) : sess.model; return runSubagents(engine, tasks, cwd, mdl, (i, phase) => { if (phase === "done") { cards[i].status = "ok"; cards[i].end = Date.now(); activeAgents = Math.max(0, activeAgents - 1); } render(); }); })()
+      const agentsCtl = ctl; (async () => { const mdl = engine === "ollama" ? (sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags())) : sess.model; return runSubagents(engine, tasks, cwd, mdl, (i, phase) => { if (phase === "done") { cards[i].status = "ok"; cards[i].end = Date.now(); activeAgents = Math.max(0, activeAgents - 1); } render(); }, agentsCtl); })()
         .then((outs) => {
           const t = ensureText();
           t.full = outs.map((o, i) => "### agent " + (i + 1) + " — " + oneline(tasks[i], 60) + "\n" + (o || "(no output)")).join("\n\n");
@@ -1724,12 +1732,12 @@ function nexusTui(engine, cwd, nexusMd) {
       const race = [...new Set([engine].concat(avail))].slice(0, 3);
       transcript.push({ role: "user", text: "/race  " + prompt });
       const block = { role: "nexus", items: [] }; transcript.push(block);
-      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Racing"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Racing"; ctl = makeCtl();
       const cards = race.map((e, i) => ({ type: "tool", id: "rc" + i, name: "Task", label: "Task(" + e + ")", status: "run", start: Date.now(), detail: e }));
       cards.forEach((c) => block.items.push(c)); startTick(); render();
       const racer = (e, i) => {
         const s = Date.now();
-        const work = (async () => { let out; try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }]); } else { out = (await runEngineTask(e, prompt, cwd, true)).output; } } catch (err) { out = "error: " + err.message; } return { e, out: (out || "").trim(), ms: Date.now() - s }; })();
+        const work = (async () => { let out; try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { out = (await runEngineTask(e, prompt, cwd, true, false, null, ctl)).output; } } catch (err) { out = "error: " + err.message; } return { e, out: (out || "").trim(), ms: Date.now() - s }; })();
         const timeout = new Promise((res) => setTimeout(() => res({ e, out: "(no response within 60s)", ms: 60000, timedOut: true }), 60000));
         return Promise.race([work, timeout]).then((r) => { cards[i].status = r.timedOut ? "err" : "ok"; cards[i].end = Date.now(); render(); return r; });
       };
@@ -1747,11 +1755,11 @@ function nexusTui(engine, cwd, nexusMd) {
       const prompt = "You are a rigorous senior reviewer. Critique the ANSWER below for correctness, bugs, security issues and anything missing. Be concise and specific; list concrete problems.\n\n--- ANSWER ---\n" + last.slice(0, 6000) + "\n--- END ANSWER ---";
       transcript.push({ role: "user", text: "/review  (second opinion from " + re + ")" });
       const block = { role: "nexus", items: [] }; transcript.push(block);
-      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Reviewing"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Reviewing"; ctl = makeCtl();
       const card = { type: "tool", id: "rv", name: "Task", label: "Task(review via " + re + ")", status: "run", start: Date.now() };
       block.items.push(card); startTick(); render();
       (async () => {
-        let out; try { if (re === "ollama") { const mdl = pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }]); } else { out = (await runEngineTask(re, prompt, cwd, false)).output; } } catch (e) { out = "error: " + e.message; }
+        let out; try { if (re === "ollama") { const mdl = pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { out = (await runEngineTask(re, prompt, cwd, false, false, null, ctl)).output; } } catch (e) { out = "error: " + e.message; }
         card.status = "ok"; card.end = Date.now(); ensureText().full = "second opinion (" + re + "):\n\n" + (out || "(no output)").trim(); busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
       })();
     };
@@ -1759,7 +1767,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const watchFix = (command) => {
       transcript.push({ role: "user", text: "/watch  " + command });
       const block = { role: "nexus", items: [] }; transcript.push(block);
-      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Watching"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Watching"; ctl = makeCtl();
       const ck = nexusCheckpoint(cwd); if (ck) checkpoints.push({ tree: ck, label: "watch " + command, ts: Date.now() });
       startTick(); render();
       (async () => {
@@ -1773,7 +1781,7 @@ function nexusTui(engine, cwd, nexusMd) {
           const t = ensureText(); t.full += (t.full ? "\n" : "") + "attempt " + att + " failed — asking " + engine + " to fix…"; render();
           const fc = { type: "tool", id: "wf" + att, name: "Task", label: "Task(fix attempt " + att + ")", status: "run", start: Date.now() }; block.items.push(fc); activeAgents = 1; render();
           const fixPrompt = "The command `" + command + "` is failing. Its output was:\n\n" + (r.output || "").slice(-3000) + "\n\nEdit the code so the command passes. Make the file edits now — do not ask questions.";
-          try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); await ollamaExec(mdl, fixPrompt, "", cwd); } else { await runEngineTask(engine, fixPrompt, cwd, true); } } catch (_) {}
+          try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); await ollamaExec(mdl, fixPrompt, "", cwd); } else { await runEngineTask(engine, fixPrompt, cwd, true, false, null, ctl); } } catch (_) {}
           fc.status = "ok"; fc.end = Date.now(); activeAgents = 0; render();
         }
         for (const it of block.items) if (it.status === "run") { it.status = "ok"; it.end = Date.now(); }
@@ -1788,11 +1796,11 @@ function nexusTui(engine, cwd, nexusMd) {
       if (!diff.trim()) { transcript.push({ role: "system", text: "nothing to commit" }); render(); return; }
       transcript.push({ role: "user", text: "/commit" });
       const block = { role: "nexus", items: [] }; transcript.push(block);
-      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Composing"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Composing"; ctl = makeCtl();
       const card = { type: "tool", id: "cm", name: "Task", label: "Task(commit message)", status: "run", start: Date.now() }; block.items.push(card); startTick(); render();
       (async () => {
         const prompt = "Write a Conventional-Commits message for this diff: a single subject line under 72 chars (type: summary), optionally a short body. Output ONLY the message, no backticks, no preamble.\n\n" + diff.slice(0, 6000);
-        let msg = ""; try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); msg = await ollamaChat(mdl, [{ role: "user", content: prompt }]); } else { msg = (await runEngineTask(engine, prompt, cwd, false)).output; } } catch (_) {}
+        let msg = ""; try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); msg = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { msg = (await runEngineTask(engine, prompt, cwd, false, false, null, ctl)).output; } } catch (_) {}
         msg = (msg || "").replace(/```[a-z]*\n?|```/g, "").trim().split("\n").slice(0, 8).join("\n").trim() || "chore: update";
         card.status = "ok"; card.end = Date.now();
         let done = false; try { const subj = msg.split("\n")[0], body = msg.split("\n").slice(1).join("\n").trim(); _cp.execSync("git commit -m " + JSON.stringify(subj) + (body ? " -m " + JSON.stringify(body) : ""), { cwd, stdio: "ignore" }); done = true; } catch (_) {}
@@ -2017,7 +2025,7 @@ function usage() {
 }
 
 // ---------- entry ----------
-process.on("SIGINT", () => { console.log("\n  " + gray("interrupted — stay sharp.") + "\n"); process.exit(130); });
+process.on("SIGINT", () => { if (tuiActive) return; console.log("\n  " + gray("interrupted — stay sharp.") + "\n"); process.exit(130); });
 const args = process.argv.slice(2);
 if (args[0] === "-v" || args[0] === "--version") { console.log("sentinel " + VERSION); process.exit(0); }
 else if (args.length === 0) mainMenu();
