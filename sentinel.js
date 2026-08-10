@@ -1065,26 +1065,48 @@ function nexusTui(engine, cwd, nexusMd) {
     const out = process.stdout, ESC = "\x1b";
     const cols = () => out.columns || 80, rows = () => out.rows || 24;
     const transcript = [{ role: "system", text: "Nexus  ·  " + engine + "  ·  " + cwd + "   —   type a message, Enter to send, /exit or Ctrl-C to quit" }];
-    let input = "", busy = false, cont = false;
+    let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", busyTimer = null;
+    const FORGE = ["Forging", "Conjuring", "Brewing", "Summoning", "Pondering", "Wrangling", "Herding", "Simmering", "Weaving", "Tinkering", "Percolating", "Noodling", "Manifesting", "Computing", "Scheming", "Cooking"];
+    const colorMd = (line, inCode) => { if (inCode) return gray(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => mag(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
     const wrap = (text) => { const width = cols() - 4; const res = []; for (const para of String(text).replace(/\r/g, "").split("\n")) { let s = para; if (!s.length) { res.push(""); continue; } while (s.length > width) { res.push(s.slice(0, width)); s = s.slice(width); } res.push(s); } return res; };
-    const bodyLines = () => { const L = []; for (const m of transcript) { if (m.role === "system") { L.push(gray(m.text)); L.push(""); continue; } L.push(m.role === "user" ? mag("› you") : cyan("▎ nexus")); for (const ln of wrap(m.text)) L.push("  " + ln); L.push(""); } return L; };
+    const bodyLines = () => {
+      const L = [];
+      for (const m of transcript) {
+        if (m.role === "system") { L.push(gray(m.text)); L.push(""); continue; }
+        L.push(m.role === "user" ? mag("› you") : cyan("▎ nexus"));
+        if (m.role === "nexus" && busy && m === transcript[transcript.length - 1] && !m.text.trim()) {
+          const el = Math.round((Date.now() - busyStart) / 1000);
+          L.push("  " + mag("✻ " + busyWord + "…") + gray("   " + el + "s"));
+        } else {
+          let inCode = false;
+          for (const ln of wrap(m.text)) { if (/^```/.test(ln.trim())) { inCode = !inCode; L.push("  " + gray(ln)); continue; } L.push("  " + (m.role === "nexus" ? colorMd(ln, inCode) : ln)); }
+        }
+        L.push("");
+      }
+      return L;
+    };
+    const IN = 3; // input text-box rows
     const render = () => {
-      const C = cols(), R = rows(), bw = C - 2, bodyRows = Math.max(1, R - 3);
+      const C = cols(), R = rows(), bw = C - 2, bodyRows = Math.max(1, R - (IN + 3)), tw = Math.max(4, bw - 4);
       const lines = bodyLines(), view = lines.slice(Math.max(0, lines.length - bodyRows));
       let b = ESC + "[H";
       for (let i = 0; i < bodyRows; i++) b += " " + (view[i] || "") + ESC + "[K\r\n";
+      // wrap the typed text into the box's inner width
+      const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, tw)); s = s.slice(tw); } }
+      wrapped[wrapped.length - 1] += busy ? "" : "▏";
+      const shown = wrapped.slice(Math.max(0, wrapped.length - IN));
       b += cyan("╭" + "─".repeat(bw) + "╮") + ESC + "[K\r\n";
-      const cap = bw - 6, disp = input.length > cap ? "…" + input.slice(-(cap - 1)) : input;
-      b += cyan("│ ") + mag("› ") + disp + (busy ? gray(" working…") : "▏") + ESC + "[K" + ESC + "[" + C + "G" + cyan("│") + "\r\n";
-      b += cyan("╰" + "─".repeat(bw) + "╯") + ESC + "[K";
+      for (let i = 0; i < IN; i++) b += cyan("│ ") + (i === 0 ? mag("› ") : "  ") + (i < shown.length ? shown[i] : "") + ESC + "[K" + ESC + "[" + C + "G" + cyan("│") + "\r\n";
+      b += cyan("╰" + "─".repeat(bw) + "╯") + gray("  Enter send · /exit quit") + ESC + "[K";
       out.write(b);
     };
-    const cleanup = () => { try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
+    const cleanup = () => { if (busyTimer) clearInterval(busyTimer); try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
     const submit = (text) => {
       transcript.push({ role: "user", text }); transcript.push({ role: "nexus", text: "" });
-      const idx = transcript.length - 1; busy = true; render();
+      const idx = transcript.length - 1; busy = true; busyStart = Date.now(); busyWord = FORGE[Math.floor(Math.random() * FORGE.length)];
+      if (busyTimer) clearInterval(busyTimer); busyTimer = setInterval(render, 1000); render();
       runEngineTask(engine, text, cwd, true, cont, (chunk) => { transcript[idx].text += chunk; render(); })
-        .then((res) => { if (!transcript[idx].text.trim()) transcript[idx].text = (res && res.output) || "(no output)"; cont = true; busy = false; render(); });
+        .then((res) => { if (!transcript[idx].text.trim()) transcript[idx].text = (res && res.output) || "(no output)"; cont = true; busy = false; if (busyTimer) { clearInterval(busyTimer); busyTimer = null; } render(); });
     };
     out.write(ESC + "[?1049h" + ESC + "[?25l" + ESC + "[2J");
     try { process.stdin.setRawMode(true); } catch (_) {}
