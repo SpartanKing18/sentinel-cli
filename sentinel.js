@@ -910,7 +910,7 @@ async function planGoal(engine, model, goal, memory) {
   return tasks.slice(0, 40).map((t, i) => ({ id: i + 1, title: String(t).slice(0, 300), done: false, failed: false, tries: 0 }));
 }
 async function verifyTask(engine, model, goal, task, res) {
-  if (engine !== "ollama") { const bad = /\b(error|failed|cannot|not found|permission denied|traceback)\b/i.test((res.output || "").slice(-600)); return { done: res.ok && !bad, reason: res.ok ? (bad ? "output mentions errors" : "completed") : "agent exited non-zero" }; }
+  if (engine !== "ollama") { const refused = /\b(could ?n['’]?t|could not|unable to|failed to complete|can['’]?t complete|cannot complete|was not able to|were unable to|i (?:can['’]?t|cannot))\b/i.test((res.output || "").slice(-1200)); return { done: res.ok && !refused, reason: !res.ok ? "agent exited non-zero" : (refused ? "agent reported it could not complete the task" : "completed") }; }
   const prompt = "Given the GOAL, a TASK, and the AGENT OUTPUT, decide if the task is genuinely complete. Return ONLY JSON {\"done\":true|false,\"reason\":\"...\"}.\nGOAL: " + goal + "\nTASK: " + task + "\nOUTPUT (truncated):\n" + String(res.output || "").slice(-2500);
   const v = extractJson(await ollamaChat(model, [{ role: "user", content: prompt }], { type: "object", properties: { done: { type: "boolean" }, reason: { type: "string" } }, required: ["done"] }), null);
   return (v && typeof v.done === "boolean") ? { done: v.done, reason: v.reason || "" } : { done: true, reason: "unverifiable" };
@@ -1000,8 +1000,7 @@ async function nexusRun(argv) {
     const t = state.tasks.find((x) => !x.done && !x.failed);
     if (!t) break;
     if (deadline && Date.now() > deadline) { console.log("  " + gray("time limit reached; pausing. Resume with:  sentinel nexus run --resume")); break; }
-    const doneN = state.tasks.filter((x) => x.done).length;
-    console.log("  " + cyan("[" + (doneN + 1) + "/" + state.tasks.length + "] ") + bold(t.title)); t.tries++;
+    console.log("  " + cyan("[" + t.id + "/" + state.tasks.length + "] ") + bold(t.title)); t.tries++;
     const ctx = "GOAL: " + state.goal + "\nDone so far: " + (state.tasks.filter((x) => x.done).map((x) => x.title).join("; ") || "(none)") + (memory ? "\nPROJECT MEMORY:\n" + memory : "");
     let res;
     if (engine === "ollama") res = await ollamaExec(model, t.title, ctx, cwd);
