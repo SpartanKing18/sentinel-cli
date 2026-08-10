@@ -994,7 +994,7 @@ function nexusRunHelp() {
   banner(); console.log("  " + bold("Nexus run") + " — autonomous, multi-level goal execution\n");
   console.log("  " + bold("USAGE") + "\n    sentinel nexus run \"<goal>\" [options]\n    sentinel nexus overnight \"<goal>\"   (alias for run --overnight)\n");
   console.log("  " + bold("OPTIONS"));
-  console.log("    -e, --engine <name>   claude (default if installed) | ollama | opencode");
+  console.log("    -e, --engine <name>   claude (default) | hybrid (local does the easy work, Claude the hard — cheapest) | ollama | opencode");
   console.log("    -n, --overnight       keep working the plan with retries until done or --until");
   console.log("        --until <t>       stop at HH:MM, or after 6h / 90m");
   console.log("        --resume          continue the last run in this folder (.nexus/run.json)");
@@ -1019,9 +1019,14 @@ async function nexusRun(argv) {
   const memory = (() => { try { return fs.readFileSync(memFile, "utf8"); } catch (_) { return ""; } })();
   const avail = { claude: hasBin("claude"), opencode: hasBin("opencode"), ollama: true };
   let engine = enginePref || (avail.claude ? "claude" : "ollama");
-  if (!avail[engine]) { console.log("  " + red("engine '" + engine + "' unavailable; using ollama")); engine = "ollama"; }
+  if (engine !== "hybrid" && !avail[engine]) { console.log("  " + red("engine '" + engine + "' unavailable; using ollama")); engine = "ollama"; }
+  if (engine === "hybrid" && !avail.claude) { console.log("  " + red("hybrid needs Claude Code installed; using ollama")); engine = "ollama"; }
   let model = null;
-  if (engine === "ollama") { const ms = await ollamaTags(); if (!ms.length) { console.log("  " + red("no local model; install Ollama or use --engine claude")); return; } model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms); }
+  if (engine === "ollama" || engine === "hybrid") {
+    const ms = await ollamaTags();
+    if (!ms.length) { if (engine === "hybrid") { console.log("  " + gray("no local model; hybrid falling back to Claude only")); engine = "claude"; } else { console.log("  " + red("no local model; install Ollama or use --engine claude")); return; } }
+    else model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms);
+  }
   let state;
   if (resume && fs.existsSync(stateFile)) { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); banner(); h1("Nexus — resuming run"); }
   else {
@@ -1030,7 +1035,7 @@ async function nexusRun(argv) {
     banner(); h1("Nexus — planning");
     console.log("  " + gray("engine ") + mag(engine) + (model ? gray("  model " + model) : "") + gray("  workdir " + cwd));
     console.log("  " + gray("decomposing the goal...\n"));
-    const tasks = await planGoal(engine, model, goal, memory);
+    const tasks = await planGoal(engine === "hybrid" ? "claude" : engine, model, goal, memory);
     state = { goal, engine, model, tasks, started: Date.now() };
     console.log("  " + bold("Plan (" + tasks.length + " tasks):"));
     tasks.forEach((t) => console.log("    " + gray(t.id + ". ") + t.title));
@@ -1045,18 +1050,29 @@ async function nexusRun(argv) {
     if (deadline && Date.now() > deadline) { console.log("  " + gray("time limit reached; pausing. Resume with:  sentinel nexus run --resume")); break; }
     console.log("  " + cyan("[" + t.id + "/" + state.tasks.length + "] ") + bold(t.title)); t.tries++;
     const ctx = "GOAL: " + state.goal + "\nDone so far: " + (state.tasks.filter((x) => x.done).map((x) => x.title).join("; ") || "(none)") + (memory ? "\nPROJECT MEMORY:\n" + memory : "");
-    let res;
-    if (engine === "ollama") res = await ollamaExec(model, t.title, ctx, cwd);
-    else res = await runEngineTask(engine, "Work in the current project directory. " + ctx + "\n\nComplete ONLY this task, then briefly report what you did:\nTASK: " + t.title, cwd, true);
-    const verdict = await verifyTask(engine, model, state.goal, t.title, res);
-    if (verdict.done) { t.done = true; console.log("  " + green("done ") + gray(t.title)); }
+    const taskPrompt = "Work in the current project directory. " + ctx + "\n\nComplete ONLY this task, then briefly report what you did:\nTASK: " + t.title;
+    let res, usedEngine = engine;
+    if (engine === "ollama") { res = await ollamaExec(model, t.title, ctx, cwd); usedEngine = "ollama"; }
+    else if (engine === "hybrid") {
+      // Cost-saver: do the work on the free local model first; only spend Claude if it can't finish.
+      console.log("    " + gray("local model first…"));
+      res = await ollamaExec(model, t.title, ctx, cwd); usedEngine = "ollama";
+      const v = await verifyTask("ollama", model, state.goal, t.title, res);
+      if (!v.done) { console.log("    " + gray("escalating to claude…")); res = await runEngineTask("claude", taskPrompt, cwd, true); usedEngine = "claude"; }
+    }
+    else { res = await runEngineTask(engine, taskPrompt, cwd, true); usedEngine = engine; }
+    const verdict = await verifyTask(usedEngine, model, state.goal, t.title, res);
+    if (verdict.done) { t.done = true; t.by = usedEngine; console.log("  " + green("done ") + gray(t.title) + gray("  [" + usedEngine + "]")); }
     else if (t.tries >= maxTries) { t.failed = true; console.log("  " + red("gave up ") + gray(t.title + " — " + verdict.reason)); }
     else console.log("  " + gray("not verified (" + verdict.reason + "); retrying"));
     save();
   }
   const okN = state.tasks.filter((t) => t.done).length, failN = state.tasks.filter((t) => t.failed).length;
   try { fs.writeFileSync(reportFile, "# Nexus run report\n\n- Goal: " + state.goal + "\n- Engine: " + engine + "\n- Completed: " + okN + "/" + state.tasks.length + (failN ? " (" + failN + " failed)" : "") + "\n\n## Tasks\n" + state.tasks.map((t) => "- [" + (t.done ? "x" : " ") + "] " + t.title + (t.failed ? "  (failed)" : "")).join("\n") + "\n"); } catch (_) {}
-  console.log("\n  " + green("run complete: ") + okN + "/" + state.tasks.length + " tasks done" + (failN ? gray(", " + failN + " failed") : "") + gray(".  Report: .nexus/report.md") + "\n");
+  const localN = state.tasks.filter((t) => t.by === "ollama").length, claudeN = state.tasks.filter((t) => t.by === "claude").length;
+  console.log("\n  " + green("run complete: ") + okN + "/" + state.tasks.length + " tasks done" + (failN ? gray(", " + failN + " failed") : ""));
+  if (engine === "hybrid") console.log("  " + gray("engine mix: ") + localN + gray(" done locally (free) · ") + claudeN + gray(" needed Claude — that's ") + Math.round(100 * localN / Math.max(1, localN + claudeN)) + gray("% off your Claude usage"));
+  console.log("  " + gray("report: .nexus/report.md") + "\n");
 }
 
 // Full-screen chat TUI (alt-screen, scrolling transcript, fixed bottom input box). No deps.
@@ -1111,13 +1127,20 @@ function nexusTui(engine, cwd, nexusMd) {
     out.write(ESC + "[?1049h" + ESC + "[?25l" + ESC + "[2J");
     try { process.stdin.setRawMode(true); } catch (_) {}
     process.stdin.resume(); process.stdin.setEncoding("utf8");
+    const handleSlash = (t) => {
+      const [cmd, arg] = t.split(/\s+/);
+      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help   /clear (new chat)   /engine <claude|opencode>   /exit" });
+      else if (cmd === "/clear" || cmd === "/new") { transcript.length = 0; transcript.push({ role: "system", text: "new chat  ·  Nexus  ·  " + engine + "  ·  " + cwd }); cont = false; }
+      else if (cmd === "/engine") { if (arg === "claude" || arg === "opencode") { engine = arg; cont = false; transcript.push({ role: "system", text: "engine switched to " + arg + " (starting a fresh conversation)" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode" }); }
+      else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
+    };
     process.stdin.on("data", (d) => {
       if (busy) return;
       const s = String(d);
       if (s === "\x03") { cleanup(); resolve(); return; }
       if (s.charCodeAt(0) === 27) return; // ignore escape sequences (arrows, etc.)
       for (const ch of s) {
-        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t) { submit(t); return; } render(); }
+        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { handleSlash(t); render(); return; } if (t) { submit(t); return; } render(); }
         else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
         else if (ch >= " ") { input += ch; render(); }
       }
