@@ -720,9 +720,11 @@ async function cli(args) {
   else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
+  else if (cmd === "init") nexusInit();
   else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {
     const sub = (rest[0] || "").toLowerCase();
-    if (sub === "run" || sub === "supervise" || sub === "loop") await nexusRun(rest.slice(1));
+    if (sub === "init") nexusInit();
+    else if (sub === "run" || sub === "supervise" || sub === "loop") await nexusRun(rest.slice(1));
     else if (sub === "overnight") await nexusRun(["--overnight"].concat(rest.slice(1)));
     else await aiCoder(rest);
   }
@@ -769,7 +771,8 @@ function nexusHelp() {
   console.log("    sentinel nexus [options] [task]     one-shot task, or interactive REPL if no task given");
   console.log("    sentinel nexus                      interactive session\n");
   console.log("  " + bold("OPTIONS"));
-  console.log("    -m, --model <name>                 model to use (default: best local coder model)");
+  console.log("    -e, --engine <name>                claude (default if installed) | ollama | opencode");
+  console.log("    -m, --model <name>                 ollama model (ollama engine)");
   console.log("    -y, --yes, --skip-permissions      auto-approve all file writes and commands");
   console.log("        --print                        headless: run one task, print the result, exit");
   console.log("    -h, --help                         show this help\n");
@@ -788,25 +791,38 @@ async function aiCoder(argv) {
   const cwd = process.cwd();
   // ---- parse flags ----
   const arr = Array.isArray(argv) ? argv.slice() : String(argv || "").split(/\s+/).filter(Boolean);
-  let autoApprove = false, printMode = false, modelOverride = "", parts = [];
+  let autoApprove = false, printMode = false, modelOverride = "", enginePref = "", parts = [];
   for (let i = 0; i < arr.length; i++) {
     const a = arr[i];
     if (a === "-y" || a === "--yes" || a === "--skip-permissions" || a === "--dangerously-skip-permissions") autoApprove = true;
     else if (a === "--print") { printMode = true; autoApprove = true; }
     else if (a === "-m" || a === "--model") modelOverride = arr[++i] || "";
+    else if (a === "-e" || a === "--engine") enginePref = arr[++i] || "";
     else if (a === "-h" || a === "--help") return nexusHelp();
     else parts.push(a);
   }
-  const ms = await ollamaTags();
-  if (!ms.length) { if (!printMode) banner(); console.log("  " + red("No local model found. Install Ollama (https://ollama.com), then `ollama pull qwen2.5-coder` or `ollama pull hermes3`.")); return; }
-  let model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms);
+  let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "config.json"), "utf8")); } catch (_) {}
+  let nexusMd = ""; try { nexusMd = fs.readFileSync(path.join(cwd, ".nexus", "NEXUS.md"), "utf8"); } catch (_) {}
+  const avail = { claude: hasBin("claude"), opencode: hasBin("opencode"), ollama: true };
+  let engine = enginePref || cfg.engine || (avail.claude ? "claude" : "ollama");
+  if (!avail[engine]) engine = "ollama";
+  let model = null;
+  if (engine === "ollama") { const ms = await ollamaTags(); if (!ms.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(ms); }
   if (!printMode) {
-    banner(); h1("Nexus — AI coder");
-    console.log("  " + gray("model ") + mag(model) + gray("   workdir ") + cyan(cwd) + (autoApprove ? "   " + gray("auto-approve ON") : ""));
-    console.log("  " + gray("Reads & writes files and runs commands here. /help for commands, /exit to quit.\n"));
+    banner();
+    const W = 56, bx = (s) => cyan("│ ") + s + " ".repeat(Math.max(0, W - 1 - s.length)) + cyan("│");
+    const dir = cwd.length > W - 8 ? "…" + cwd.slice(-(W - 9)) : cwd;
+    console.log("  " + cyan("╭" + "─".repeat(W) + "╮"));
+    console.log("  " + bx("Nexus — AI coding agent"));
+    console.log("  " + bx("engine: " + engine + (model ? "  (" + model + ")" : "  (Claude Code)")));
+    console.log("  " + bx("dir:    " + dir));
+    if (nexusMd) console.log("  " + bx("context: .nexus/NEXUS.md loaded"));
+    console.log("  " + cyan("╰" + "─".repeat(W) + "╯"));
+    console.log("  " + gray("message Nexus below · /help for commands · /exit to quit") + (autoApprove ? gray(" · auto-approve ON") : "") + "\n");
   }
-  const SYS = "You are Nexus, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
+  const SYS = "You are Nexus, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary." + (nexusMd ? "\n\nPROJECT INSTRUCTIONS (.nexus/NEXUS.md):\n" + nexusMd.slice(0, 4000) : "");
   const messages = [{ role: "system", content: SYS }];
+  let delegated = false;
   const changed = [];  // session change log for /undo and /diff: {path, before|null, label}
   const relp = (p) => path.relative(cwd, p) || p;
   // ---- permission gate (Glitch-style): confirm risky actions unless auto-approve ----
@@ -820,7 +836,7 @@ async function aiCoder(argv) {
   while (true) {
     if (!task) {
       if (printMode) return;
-      const t = (await ask("nexus>")).trim();
+      const t = (await ask("›")).trim();
       if (!t) { task = ""; continue; }
       if (/^\/?(exit|quit|q)$/i.test(t)) { console.log("\n  " + gray("stay sharp.") + "\n"); return; }
       if (t === "/help") { nexusHelp(); continue; }
@@ -835,6 +851,13 @@ async function aiCoder(argv) {
     // @path attaches a file's contents to the prompt (e.g. "fix the bug in @src/app.js")
     const userMsg = task.replace(/(^|\s)@(\S+)/g, (m, pre, p) => { try { const c = fs.readFileSync(path.resolve(cwd, p), "utf8"); return pre + "\n\n--- " + p + " ---\n" + c.slice(0, 12000) + "\n--- end " + p + " ---\n"; } catch (_) { return m; } });
     messages.push({ role: "user", content: userMsg }); task = "";
+    if (engine !== "ollama") {
+      console.log("  " + gray("nexus (" + engine + ") working…\n"));
+      await runEngineTask(engine, userMsg, cwd, autoApprove, delegated);
+      delegated = true; console.log("");
+      if (printMode) return;
+      continue;
+    }
     let didTool = false, nudges = 0;
     for (let step = 1; step <= 40; step++) {
       let raw; try { raw = await ollamaChat(model, messages, CODER_SCHEMA); } catch (e) { console.log("  " + red(e.message)); break; }
@@ -880,10 +903,10 @@ const _cp = require("child_process");
 function hasBin(b) { try { const r = _cp.spawnSync(b, ["--version"], { timeout: 6000 }); return !r.error; } catch (_) { return false; } }
 
 // Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
-function runEngineTask(engine, prompt, cwd, autonomous) {
+function runEngineTask(engine, prompt, cwd, autonomous, cont) {
   return new Promise((resolve) => {
     let cmd, args;
-    if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (autonomous) args.push("--dangerously-skip-permissions"); }
+    if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (cont) args.push("--continue"); if (autonomous) args.push("--dangerously-skip-permissions"); }
     else if (engine === "opencode") { cmd = "opencode"; args = ["run", prompt]; }
     else return resolve({ ok: false, output: "unknown engine: " + engine });
     let out = "";
@@ -1016,14 +1039,38 @@ async function nexusRun(argv) {
   console.log("\n  " + green("run complete: ") + okN + "/" + state.tasks.length + " tasks done" + (failN ? gray(", " + failN + " failed") : "") + gray(".  Report: .nexus/report.md") + "\n");
 }
 
+function nexusInit() {
+  const fs = require("fs"), path = require("path");
+  const cwd = process.cwd(), NEXUS = path.join(cwd, ".nexus");
+  fs.mkdirSync(NEXUS, { recursive: true });
+  const mdPath = path.join(NEXUS, "NEXUS.md"), cfgPath = path.join(NEXUS, "config.json");
+  const detected = [];
+  try { if (fs.existsSync("package.json")) { const p = JSON.parse(fs.readFileSync("package.json", "utf8")); detected.push("Node project" + (p.name ? " (" + p.name + ")" : "")); if (p.scripts) detected.push("npm scripts: " + Object.keys(p.scripts).slice(0, 8).join(", ")); } } catch (_) {}
+  try { if (fs.existsSync("requirements.txt") || fs.existsSync("pyproject.toml") || fs.existsSync("setup.py")) detected.push("Python project"); } catch (_) {}
+  try { if (fs.existsSync("Cargo.toml")) detected.push("Rust project"); } catch (_) {}
+  try { if (fs.existsSync("go.mod")) detected.push("Go project"); } catch (_) {}
+  try { if (fs.existsSync(".git")) detected.push("git repository"); } catch (_) {}
+  let created = [];
+  if (!fs.existsSync(mdPath)) { fs.writeFileSync(mdPath, "# Nexus project instructions\n\nNexus loads this file at the start of every session. Describe the project, conventions, and how to build/run/test it so the agent has context.\n\n## Project\n" + (detected.length ? detected.map((d) => "- " + d).join("\n") : "- (describe your project here)") + "\n\n## Conventions\n- (code style, patterns to follow, things to avoid)\n\n## Build / run / test\n- (commands to build, run, and test)\n"); created.push("NEXUS.md"); }
+  if (!fs.existsSync(cfgPath)) { fs.writeFileSync(cfgPath, JSON.stringify({ engine: hasBin("claude") ? "claude" : "ollama", model: process.env.SENTINEL_MODEL || "" }, null, 2) + "\n"); created.push("config.json"); }
+  banner(); h1("Nexus initialized");
+  created.forEach((f) => console.log("  " + green("created ") + ".nexus/" + f));
+  if (!created.length) console.log("  " + gray("already initialized (.nexus/ exists)"));
+  if (detected.length) console.log("\n  " + gray("detected: ") + detected.join(gray(" · ")));
+  console.log("\n  " + bold("Next steps"));
+  console.log("    " + cyan("sentinel nexus") + gray("                 start a chat session"));
+  console.log("    " + cyan("sentinel nexus run \"<goal>\"") + gray("     autonomous multi-step run"));
+  console.log("    " + gray("edit ") + ".nexus/NEXUS.md" + gray(" to give the agent project context") + "\n");
+}
 function usage() {
   banner();
   console.log(`  ${bold("USAGE")}
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
-    nexus [opts] [task]               Nexus AI coder (interactive/one-shot): -y skip prompts, --print headless, -m <model>
-    nexus run "<goal>" [opts]         autonomous multi-level runner: -e claude|ollama|opencode, --overnight, --until, --resume
+    init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
+    nexus [opts] [task]               Nexus AI coder chat: -e claude|ollama|opencode, -y skip prompts, --print headless
+    nexus run "<goal>" [opts]         autonomous multi-level runner: -e engine, --overnight, --until, --resume
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
