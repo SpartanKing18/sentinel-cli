@@ -1101,19 +1101,19 @@ function nexusTui(engine, cwd, nexusMd) {
       }
       return L;
     };
-    const IN = 3; // input text-box rows
     const render = () => {
-      const C = cols(), R = rows(), bw = C - 2, bodyRows = Math.max(1, R - (IN + 3)), tw = Math.max(4, bw - 4);
+      const C = cols(), R = rows(), iw = Math.max(4, C - 3);
+      const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } }
+      const inRows = Math.max(1, Math.min(wrapped.length, 8));
+      const bodyRows = Math.max(1, R - (inRows + 3)); // top rule + input rows + bottom rule + hint
       const lines = bodyLines(), view = lines.slice(Math.max(0, lines.length - bodyRows));
       let b = ESC + "[H";
       for (let i = 0; i < bodyRows; i++) b += " " + (view[i] || "") + ESC + "[K\r\n";
-      // wrap the typed text into the box's inner width
-      const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, tw)); s = s.slice(tw); } }
-      wrapped[wrapped.length - 1] += busy ? "" : "▏";
-      const shown = wrapped.slice(Math.max(0, wrapped.length - IN));
-      b += cyan("╭" + "─".repeat(bw) + "╮") + ESC + "[K\r\n";
-      for (let i = 0; i < IN; i++) b += cyan("│ ") + (i === 0 ? mag("› ") : "  ") + (i < shown.length ? shown[i] : "") + ESC + "[K" + ESC + "[" + C + "G" + cyan("│") + "\r\n";
-      b += cyan("╰" + "─".repeat(bw) + "╯") + gray("  Enter send · /exit quit") + ESC + "[K";
+      b += gray("─".repeat(C)) + ESC + "[K\r\n";
+      const shown = wrapped.slice(Math.max(0, wrapped.length - inRows));
+      for (let i = 0; i < inRows; i++) { const cur = (i === inRows - 1 && !busy) ? "█" : ""; b += (i === 0 ? bold(mag("❯ ")) : "  ") + (shown[i] || "") + cur + ESC + "[K\r\n"; }
+      b += gray("─".repeat(C)) + ESC + "[K\r\n";
+      b += gray("  Enter send  ·  /help  ·  /exit") + ESC + "[K";
       out.write(b);
     };
     const cleanup = () => { if (busyTimer) clearInterval(busyTimer); try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
@@ -1127,6 +1127,7 @@ function nexusTui(engine, cwd, nexusMd) {
     out.write(ESC + "[?1049h" + ESC + "[?25l" + ESC + "[2J");
     try { process.stdin.setRawMode(true); } catch (_) {}
     process.stdin.resume(); process.stdin.setEncoding("utf8");
+    let loading = true;
     const handleSlash = (t) => {
       const [cmd, arg] = t.split(/\s+/);
       if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help   /clear (new chat)   /engine <claude|opencode>   /exit" });
@@ -1135,7 +1136,7 @@ function nexusTui(engine, cwd, nexusMd) {
       else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
     };
     process.stdin.on("data", (d) => {
-      if (busy) return;
+      if (loading || busy) return;
       const s = String(d);
       if (s === "\x03") { cleanup(); resolve(); return; }
       if (s.charCodeAt(0) === 27) return; // ignore escape sequences (arrows, etc.)
@@ -1145,8 +1146,24 @@ function nexusTui(engine, cwd, nexusMd) {
         else if (ch >= " ") { input += ch; render(); }
       }
     });
-    out.on("resize", render);
-    render();
+    out.on("resize", () => { if (!loading) render(); });
+    (function boot() {
+      const spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], word = "N E X U S", pool = "01<>[]{}#@$%&*/\\=+ABCDEF";
+      const steps = ["linking " + engine + " engine", "loading tools", "priming context", "ready"];
+      let f = 0; const total = 24;
+      const t = setInterval(() => {
+        const C = cols(), R = rows(), cx = (C / 2) | 0, cy = (R / 2) | 0;
+        let title = ""; for (let k = 0; k < word.length; k++) title += (word[k] === " " || k < (f / total) * word.length) ? word[k] : pool[(Math.random() * pool.length) | 0];
+        const bar = Math.round((f / total) * 22);
+        const put = (row, s, vis) => ESC + "[" + row + ";" + Math.max(1, cx - (((vis || s.length) / 2) | 0)) + "H" + s;
+        let b = ESC + "[2J";
+        b += put(cy - 1, cyan(spin[f % spin.length]) + "  " + bold(title), word.length + 3);
+        b += put(cy + 1, gray("[") + cyan("█".repeat(bar)) + gray("░".repeat(22 - bar)) + gray("]"), 24);
+        b += put(cy + 3, gray(steps[Math.min(steps.length - 1, ((f / total) * steps.length) | 0)] + "…"), 22);
+        out.write(b);
+        if (++f > total) { clearInterval(t); loading = false; out.write(ESC + "[2J"); render(); }
+      }, 55);
+    })();
   });
 }
 function nexusInit() {
