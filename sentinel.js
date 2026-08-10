@@ -787,6 +787,7 @@ function nexusHelp() {
   console.log("    -e, --engine <name>                claude (default if installed) | ollama | opencode");
   console.log("    -m, --model <name>                 ollama model (ollama engine)");
   console.log("    -y, --yes, --skip-permissions      auto-approve all file writes and commands");
+  console.log("        --tui                          full-screen UI: scrolling chat + fixed input box (claude/opencode)");
   console.log("        --print                        headless: run one task, print the result, exit");
   console.log("    -h, --help                         show this help\n");
   console.log("  " + bold("IN-SESSION COMMANDS"));
@@ -804,11 +805,12 @@ async function aiCoder(argv) {
   const cwd = process.cwd();
   // ---- parse flags ----
   const arr = Array.isArray(argv) ? argv.slice() : String(argv || "").split(/\s+/).filter(Boolean);
-  let autoApprove = false, printMode = false, modelOverride = "", enginePref = "", parts = [];
+  let autoApprove = false, printMode = false, modelOverride = "", enginePref = "", tuiFlag = false, parts = [];
   for (let i = 0; i < arr.length; i++) {
     const a = arr[i];
     if (a === "-y" || a === "--yes" || a === "--skip-permissions" || a === "--dangerously-skip-permissions") autoApprove = true;
     else if (a === "--print") { printMode = true; autoApprove = true; }
+    else if (a === "--tui" || a === "--ui") tuiFlag = true;
     else if (a === "-m" || a === "--model") modelOverride = arr[++i] || "";
     else if (a === "-e" || a === "--engine") enginePref = arr[++i] || "";
     else if (a === "-h" || a === "--help") return nexusHelp();
@@ -819,6 +821,11 @@ async function aiCoder(argv) {
   const avail = { claude: hasBin("claude"), opencode: hasBin("opencode"), ollama: true };
   let engine = enginePref || cfg.engine || (avail.claude ? "claude" : "ollama");
   if (!avail[engine]) engine = "ollama";
+  if (tuiFlag) {
+    if (engine === "ollama") { if (!printMode) console.log("  " + gray("full-screen --tui needs the claude or opencode engine (try -e claude); using the chatbox.")); }
+    else if (!process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
+    else return nexusTui(engine, cwd, nexusMd);
+  }
   let model = null;
   if (engine === "ollama") { const ms = await ollamaTags(); if (!ms.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(ms); }
   if (!printMode) {
@@ -916,7 +923,7 @@ const _cp = require("child_process");
 function hasBin(b) { try { const r = _cp.spawnSync(b, ["--version"], { timeout: 6000 }); return !r.error; } catch (_) { return false; } }
 
 // Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
-function runEngineTask(engine, prompt, cwd, autonomous, cont) {
+function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk) {
   return new Promise((resolve) => {
     let cmd, args;
     if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (cont) args.push("--continue"); if (autonomous) args.push("--dangerously-skip-permissions"); }
@@ -924,7 +931,7 @@ function runEngineTask(engine, prompt, cwd, autonomous, cont) {
     else return resolve({ ok: false, output: "unknown engine: " + engine });
     let out = "";
     const p = _cp.spawn(cmd, args, { cwd, env: process.env });
-    p.stdout.on("data", (d) => { const s = d.toString(); out += s; process.stdout.write(gray("    " + s.replace(/\n/g, "\n    "))); });
+    p.stdout.on("data", (d) => { const s = d.toString(); out += s; if (onChunk) onChunk(s); else process.stdout.write(gray("    " + s.replace(/\n/g, "\n    "))); });
     p.stderr.on("data", (d) => (out += d.toString()));
     const to = setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} }, 40 * 60 * 1000);
     p.on("close", (code) => { clearTimeout(to); resolve({ ok: code === 0, output: out.slice(-12000) }); });
@@ -1052,6 +1059,51 @@ async function nexusRun(argv) {
   console.log("\n  " + green("run complete: ") + okN + "/" + state.tasks.length + " tasks done" + (failN ? gray(", " + failN + " failed") : "") + gray(".  Report: .nexus/report.md") + "\n");
 }
 
+// Full-screen chat TUI (alt-screen, scrolling transcript, fixed bottom input box). No deps.
+function nexusTui(engine, cwd, nexusMd) {
+  return new Promise((resolve) => {
+    const out = process.stdout, ESC = "\x1b";
+    const cols = () => out.columns || 80, rows = () => out.rows || 24;
+    const transcript = [{ role: "system", text: "Nexus  ·  " + engine + "  ·  " + cwd + "   —   type a message, Enter to send, /exit or Ctrl-C to quit" }];
+    let input = "", busy = false, cont = false;
+    const wrap = (text) => { const width = cols() - 4; const res = []; for (const para of String(text).replace(/\r/g, "").split("\n")) { let s = para; if (!s.length) { res.push(""); continue; } while (s.length > width) { res.push(s.slice(0, width)); s = s.slice(width); } res.push(s); } return res; };
+    const bodyLines = () => { const L = []; for (const m of transcript) { if (m.role === "system") { L.push(gray(m.text)); L.push(""); continue; } L.push(m.role === "user" ? mag("› you") : cyan("▎ nexus")); for (const ln of wrap(m.text)) L.push("  " + ln); L.push(""); } return L; };
+    const render = () => {
+      const C = cols(), R = rows(), bw = C - 2, bodyRows = Math.max(1, R - 3);
+      const lines = bodyLines(), view = lines.slice(Math.max(0, lines.length - bodyRows));
+      let b = ESC + "[H";
+      for (let i = 0; i < bodyRows; i++) b += " " + (view[i] || "") + ESC + "[K\r\n";
+      b += cyan("╭" + "─".repeat(bw) + "╮") + ESC + "[K\r\n";
+      const cap = bw - 6, disp = input.length > cap ? "…" + input.slice(-(cap - 1)) : input;
+      b += cyan("│ ") + mag("› ") + disp + (busy ? gray(" working…") : "▏") + ESC + "[K" + ESC + "[" + C + "G" + cyan("│") + "\r\n";
+      b += cyan("╰" + "─".repeat(bw) + "╯") + ESC + "[K";
+      out.write(b);
+    };
+    const cleanup = () => { try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
+    const submit = (text) => {
+      transcript.push({ role: "user", text }); transcript.push({ role: "nexus", text: "" });
+      const idx = transcript.length - 1; busy = true; render();
+      runEngineTask(engine, text, cwd, true, cont, (chunk) => { transcript[idx].text += chunk; render(); })
+        .then((res) => { if (!transcript[idx].text.trim()) transcript[idx].text = (res && res.output) || "(no output)"; cont = true; busy = false; render(); });
+    };
+    out.write(ESC + "[?1049h" + ESC + "[?25l" + ESC + "[2J");
+    try { process.stdin.setRawMode(true); } catch (_) {}
+    process.stdin.resume(); process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (d) => {
+      if (busy) return;
+      const s = String(d);
+      if (s === "\x03") { cleanup(); resolve(); return; }
+      if (s.charCodeAt(0) === 27) return; // ignore escape sequences (arrows, etc.)
+      for (const ch of s) {
+        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t) { submit(t); return; } render(); }
+        else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
+        else if (ch >= " ") { input += ch; render(); }
+      }
+    });
+    out.on("resize", render);
+    render();
+  });
+}
 function nexusInit() {
   const fs = require("fs"), path = require("path");
   const cwd = process.cwd(), NEXUS = path.join(cwd, ".nexus");
