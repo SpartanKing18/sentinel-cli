@@ -72,11 +72,13 @@ function banner() {
     "  ███████║███████╗██║ ╚████║   ██║   ██║██║ ╚████║███████╗███████╗",
     "  ╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝",
   ];
-  const tint = [cyan, cyan, (s) => p(A.blue, s), (s) => p(A.blue, s), mag, mag];
+  // smooth vertical cyan → violet → magenta gradient (256-color, falls back to plain)
+  const grad = ["38;5;51", "38;5;45", "38;5;44", "38;5;99", "38;5;134", "38;5;170"];
   console.log("");
-  art.forEach((l, i) => console.log(bold(tint[i](l))));
-  console.log("  " + gray("┌─ ") + bold("security console") + gray(" · terminal edition ─ ") + mag("v" + VERSION) + gray(" ─ ") + gray(os.platform() + "/" + os.arch()));
-  console.log("  " + gray("└─ use only on systems you own or are authorized to test."));
+  if (useColor) art.forEach((l, i) => console.log("\x1b[1;" + grad[i] + "m" + l + "\x1b[0m"));
+  else art.forEach((l) => console.log(l));
+  console.log("  " + gray("╭─ ") + bold(cyan("security console")) + gray(" · terminal edition · ") + mag("v" + VERSION) + gray(" · ") + gray(os.platform() + "/" + os.arch()));
+  console.log("  " + gray("╰─ ") + dim("only what you own or are authorized to test.") + "\n");
 }
 const rl = () => readline.createInterface({ input: process.stdin, output: process.stdout });
 function ask(q) { return new Promise((res) => { const r = rl(); r.question(cyan("  " + q + " "), (a) => { r.close(); res(a.trim()); }); }); }
@@ -826,8 +828,8 @@ async function aiCoder(argv) {
     else if (!process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
     else return nexusTui(engine, cwd, nexusMd);
   }
-  let model = null;
-  if (engine === "ollama") { const ms = await ollamaTags(); if (!ms.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(ms); }
+  let model = null, modelList = [];
+  if (engine === "ollama") { modelList = await ollamaTags(); if (!modelList.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(modelList); }
   if (!printMode) {
     banner();
     const W = 56, bx = (s) => cyan("│ ") + s + " ".repeat(Math.max(0, W - 1 - s.length)) + cyan("│");
@@ -862,9 +864,9 @@ async function aiCoder(argv) {
       if (t === "/help") { nexusHelp(); continue; }
       if (t === "/auto") { autoApprove = !autoApprove; console.log("  " + gray("auto-approve " + (autoApprove ? "ON" : "OFF"))); continue; }
       if (t === "/clear") { messages.length = 1; console.log("  " + gray("conversation cleared")); continue; }
-      if (t.startsWith("/model")) { const m = t.split(/\s+/)[1]; if (m) { model = m; console.log("  " + gray("model -> " + m)); } else console.log("  " + gray("model: " + model + gray("  available: " + ms.join(", ")))); continue; }
-      if (t === "/undo") { const c = changed.pop(); if (!c) console.log("  " + gray("nothing to undo")); else try { if (c.before == null) { fs.unlinkSync(c.path); console.log("  " + gray("undid " + c.label + " (deleted new file)")); } else { fs.writeFileSync(c.path, c.before); console.log("  " + gray("undid " + c.label)); } } catch (e) { console.log("  " + red("undo failed: " + e.message)); } continue; }
-      if (t === "/diff" || t === "/changed") { if (!changed.length) console.log("  " + gray("no changes this session")); else { console.log("  " + gray("changed this session:")); changed.forEach((c) => console.log("    " + relp(c.path) + (c.before == null ? gray("  (new)") : ""))); } continue; }
+      if (t.startsWith("/model")) { const m = t.split(/\s+/)[1]; if (m) { model = m; console.log("  " + gray("model -> " + m)); } else console.log("  " + gray("model: " + (model || "(engine default)") + (modelList.length ? gray("  available: " + modelList.join(", ")) : ""))); continue; }
+      if (t === "/undo") { const c = changed.pop(); if (!c) console.log("  " + gray("nothing to undo")); else try { if (c.isNew) { fs.unlinkSync(c.path); console.log("  " + gray("undid " + c.label + " (deleted new file)")); } else if (c.before != null) { fs.writeFileSync(c.path, c.before); console.log("  " + gray("undid " + c.label)); } else { console.log("  " + yellow("skipped undo of " + c.label + " — original contents weren't captured (file existed but was unreadable); not deleting it")); } } catch (e) { console.log("  " + red("undo failed: " + e.message)); } continue; }
+      if (t === "/diff" || t === "/changed") { if (!changed.length) console.log("  " + gray("no changes this session")); else { console.log("  " + gray("changed this session:")); changed.forEach((c) => console.log("    " + relp(c.path) + (c.isNew ? gray("  (new)") : ""))); } continue; }
       if (t.startsWith("/")) { console.log("  " + gray("unknown command; try /help")); continue; }
       task = t;
     }
@@ -894,7 +896,7 @@ async function aiCoder(argv) {
         else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; if (!printMode) console.log("  " + cyan("ls ") + (a.path || ".")); }
         else if (name === "write_file") {
           if (!(await approve("write " + a.path))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.path); }
-          else { const fp = path.resolve(cwd, a.path); let before = null; try { before = fs.readFileSync(fp, "utf8"); } catch (_) {} fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); changed.push({ path: fp, before, label: "write " + a.path }); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines" + (before != null ? ", was " + before.split("\n").length : "") + ")")); }
+          else { const fp = path.resolve(cwd, a.path); let before = null, isNew = false; try { before = fs.readFileSync(fp, "utf8"); } catch (e) { if (e.code === "ENOENT") isNew = true; } fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); changed.push({ path: fp, before, isNew, label: "write " + a.path }); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines" + (before != null ? ", was " + before.split("\n").length : "") + ")")); }
         }
         else if (name === "edit_file") {
           const fp = path.resolve(cwd, a.path); let t;
@@ -1158,10 +1160,17 @@ function nexusTui(engine, cwd, nexusMd) {
     let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
     let expanded = false, mode = 1, runningShells = 0, activeAgents = 0; // mode: 0 normal, 1 auto-accept, 2 plan
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
-    const compact = { on: false, f: 0 };
+    const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
     let ctl = null, costCap = 0, rate = null, warned50 = false;      // interruption, budget, rate-limit
     const checkpoints = [];                                          // { tree, label, ts }
+    const fs = require("fs"), path = require("path");
+    // @path inlines a file's contents into the prompt sent to the engine (display keeps the @mention)
+    const inlineAts = (t) => t.replace(/(^|\s)@(\S+)/g, (m, pre, f) => { try { const c = fs.readFileSync(path.resolve(cwd, f), "utf8"); return pre + "\n\n--- " + f + " ---\n" + c.slice(0, 12000) + "\n--- end " + f + " ---\n"; } catch (_) { return m; } });
+    // !cmd runs a shell command directly (Claude-Code-style passthrough); output shown inline
+    const runBang = (c) => { const blk = { role: "system", text: "$ " + c + "\nrunning…" }; transcript.push(blk); render(); coderShell(c, cwd).then((r) => { const o = (r.output || "").replace(/[ \t\r\n]+$/, ""); blk.text = "$ " + c + "\n" + (o || "(no output)") + (r.code ? "\n[exit " + r.code + "]" : ""); render(); }); };
+    // #note appends a durable memory to .nexus/NEXUS.md
+    const addMemory = (line) => { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"); let c = ""; try { c = fs.readFileSync(md, "utf8"); } catch (_) {} if (!/\n##\s*Notes/.test(c)) c += (c && !c.endsWith("\n") ? "\n" : "") + "\n## Notes\n"; c += "- " + line + "\n"; fs.writeFileSync(md, c); transcript.push({ role: "system", text: "remembered → .nexus/NEXUS.md: " + line }); } catch (e) { transcript.push({ role: "system", text: "could not save note: " + e.message }); } };
     // ---- ansi-aware width helpers ----
     const stripA = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
     const clip = (s, n) => { let o = "", v = 0; for (const part of String(s).split(/(\x1b\[[0-9;]*m)/)) { if (/^\x1b/.test(part)) { o += part; continue; } for (const ch of part) { if (v >= n) return o; o += ch; v++; } } return o; };
@@ -1198,8 +1207,8 @@ function nexusTui(engine, cwd, nexusMd) {
     const bodyLines = () => {
       const L = [];
       for (const m of transcript) {
-        if (m.role === "system") { L.push(gray(m.text)); L.push(""); continue; }
-        if (m.role === "user") { L.push(mag("› ") + m.text); L.push(""); continue; }
+        if (m.role === "system") { for (const ln of wrap(m.text)) L.push(gray(ln)); L.push(""); continue; }
+        if (m.role === "user") { const w = wrap(m.text); L.push(mag("› ") + (w[0] || "")); for (let i = 1; i < w.length; i++) L.push("  " + w[i]); L.push(""); continue; }
         // nexus turn: ordered items (text + tool cards)
         L.push(cyan("● ") + bold("nexus") + gray("  " + engine));
         for (const it of (m.items || [])) {
@@ -1211,7 +1220,7 @@ function nexusTui(engine, cwd, nexusMd) {
             const dot = it.status === "run" ? yellow(spin[(Date.now() / 90 | 0) % spin.length]) : it.status === "err" ? red("●") : green("●");
             const secs = it.end ? ((it.end - it.start) / 1000).toFixed(1) + "s" : ((Date.now() - it.start) / 1000).toFixed(1) + "s";
             L.push("  " + dot + " " + bold(it.label) + gray("  " + secs));
-            if (expanded && it.detail) for (const ln of wrap(it.detail).slice(0, 6)) L.push("    " + gray("⎿ " + ln));
+            if (expanded && it.detail) for (const ln of wrap(stripA(it.detail)).slice(0, 6)) L.push("    " + gray("⎿ " + ln));
           }
         }
         // live status line while this turn is running
@@ -1244,18 +1253,21 @@ function nexusTui(engine, cwd, nexusMd) {
       return "  " + clip(parts.join(gray("  ·  ")), cols() - 3);
     };
     const hint = () => {
-      if (compact.on) { const n = 22, f = Math.min(n, compact.f); return "  " + yellow("Compacting conversation… ") + gray("[") + cyan("▓".repeat(f)) + gray("░".repeat(n - f)) + gray("] ") + Math.round((f / n) * 100) + "%"; }
-      return "  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" cycle mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("/help");
+      const C = cols();
+      if (compact.on) { const n = 22, f = Math.min(n, compact.f); return clip("  " + yellow("Compacting conversation… ") + gray("[") + cyan("▓".repeat(f)) + gray("░".repeat(n - f)) + gray("] ") + Math.round((f / n) * 100) + "%", C - 2); }
+      return clip("  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("@") + gray("file ") + blue("!") + gray("sh ") + blue("#") + gray("note  ") + blue("/help"), C - 2);
     };
     const render = () => {
       const C = cols(), R = rows(), iw = Math.max(4, C - 3);
       const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } }
-      const inRows = Math.max(1, Math.min(wrapped.length, 8));
+      // clamp input rows so the whole chrome always fits even on short terminals
+      const maxIn = Math.max(1, R - 4);
+      const inRows = Math.max(1, Math.min(wrapped.length, 8, maxIn));
       const chrome = 1 /*status*/ + 1 /*rule*/ + inRows + 1 /*rule*/ + 1 /*hint*/;
       const bodyRows = Math.max(1, R - chrome);
       const lines = bodyLines(), view = lines.slice(Math.max(0, lines.length - bodyRows));
       let b = ESC + "[H";
-      for (let i = 0; i < bodyRows; i++) b += " " + (view[i] || "") + ESC + "[K\r\n";
+      for (let i = 0; i < bodyRows; i++) b += " " + clip(view[i] || "", C - 2) + ESC + "[K\r\n";
       b += statusBar() + ESC + "[K\r\n";
       b += gray("─".repeat(C)) + ESC + "[K\r\n";
       const shown = wrapped.slice(Math.max(0, wrapped.length - inRows));
@@ -1269,11 +1281,12 @@ function nexusTui(engine, cwd, nexusMd) {
     const startTick = () => { if (tick) return; tick = setInterval(() => { const b = cur(); if (b && b.items) for (const it of b.items) if (it.type === "text" && it.shown < it.full.length) it.shown = Math.min(it.full.length, it.shown + Math.max(2, Math.ceil((it.full.length - it.shown) / 22))); render(); if (!busy && !revealing() && !compact.on) { clearInterval(tick); tick = null; } }, 45); };
     // ---- context compaction (visual + local prune) ----
     const doCompact = (auto) => {
+      if (compact.on) return;
       compact.on = true; compact.f = 0; startTick();
-      const iv = setInterval(() => {
+      compact.iv = setInterval(() => {
         compact.f += 1;
         if (compact.f >= 22) {
-          clearInterval(iv);
+          clearInterval(compact.iv); compact.iv = null;
           const keep = transcript.slice(-6);
           transcript.length = 0;
           transcript.push({ role: "system", text: "[earlier conversation compacted to save context" + (auto ? " — auto at " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "%" : "") + "]" });
@@ -1283,23 +1296,25 @@ function nexusTui(engine, cwd, nexusMd) {
       }, 60);
     };
     const maybeAutoCompact = () => { if (sess.ctxUsed > 0.8 * (sess.ctxWindow || 200000) && !compact.on) doCompact(true); };
-    const cleanup = () => { if (tick) clearInterval(tick); try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
+    const onResize = () => { if (!loading) render(); };
+    const cleanup = () => { if (tick) { clearInterval(tick); tick = null; } if (compact.iv) { clearInterval(compact.iv); compact.iv = null; } if (ctl && ctl.kill) try { ctl.kill(); } catch (_) {} try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.removeListener("resize", onResize); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
     // ---- engine turn ----
     const submit = (text) => {
       if (costCap && sess.cost >= costCap) { transcript.push({ role: "system", text: "budget reached ($" + sess.cost.toFixed(4) + " ≥ cap $" + costCap.toFixed(2) + ") — raise it with /budget <amount> to continue" }); render(); return; }
       history.push(text); hIdx = history.length;
       transcript.push({ role: "user", text });
-      const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + text : text;
+      const sendText = inlineAts(text);
+      const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + sendText : sendText;
       const block = { role: "nexus", items: [] }; transcript.push(block);
       const stat = { files: new Set(), cmds: 0, inTok0: sess.inTok, outTok0: sess.outTok, cost0: sess.cost, t0: Date.now() };
-      const ckTree = (mode !== 2 && engine !== "ollama") ? nexusCheckpoint(cwd) : null;
+      const ckTree = (engine !== "ollama") ? nexusCheckpoint(cwd) : null; // always checkpoint so /undo can recover even in plan mode
       if (ckTree) checkpoints.push({ tree: ckTree, label: oneline(text, 40), ts: Date.now() });
       busy = true; busyStart = Date.now(); busyWord = FORGE[Math.floor(Math.random() * FORGE.length)]; sess.liveOut = 0; ctl = {};
       startTick(); render();
       const finish = (res) => {
         for (const it of block.items) if (it.type === "tool" && it.status === "run") { it.status = res && res.interrupted ? "err" : "ok"; it.end = Date.now(); }
         runningShells = 0; activeAgents = 0; ctl = null;
-        if (!block.items.length && (!block.items.some((i) => i.type === "text" && i.full.trim()))) { const t = ensureText(); if (!t.full.trim()) t.full = res && res.interrupted ? "(interrupted)" : (res && res.output) || "(no output)"; }
+        if (!block.items.length || !block.items.some((i) => i.type === "text" && i.full.trim())) { const t = ensureText(); if (!t.full.trim()) t.full = res && res.interrupted ? "(interrupted)" : (res && res.output) || "(no output)"; }
         const dt = ((Date.now() - stat.t0) / 1000).toFixed(1);
         const din = sess.inTok - stat.inTok0, dout = sess.outTok - stat.outTok0, dcost = sess.cost - stat.cost0;
         const bits = [];
@@ -1310,7 +1325,9 @@ function nexusTui(engine, cwd, nexusMd) {
         bits.push(dt + "s");
         if (ckTree) bits.push("undo #" + checkpoints.length);
         block.summary = bits.join("  ·  ");
-        cont = true; busy = false; if (costCap && sess.cost >= costCap) transcript.push({ role: "system", text: "budget cap reached ($" + sess.cost.toFixed(4) + ") — /budget <amount> to raise" }); maybeAutoCompact(); render();
+        cont = true; busy = false; if (costCap && sess.cost >= costCap) transcript.push({ role: "system", text: "budget cap reached ($" + sess.cost.toFixed(4) + ") — /budget <amount> to raise" });
+        if (!warned50 && sess.ctxUsed > 0.5 * (sess.ctxWindow || 200000)) { warned50 = true; transcript.push({ role: "system", text: "context is over 50% — quality can dip on very long sessions; use /compact or /clear when it makes sense" }); }
+        maybeAutoCompact(); render();
       };
       if (engine === "claude") {
         runClaudeStream(promptText, cwd, cont, {
@@ -1361,7 +1378,7 @@ function nexusTui(engine, cwd, nexusMd) {
     // ---- slash commands ----
     const handleSlash = (t) => {
       const [cmd, arg] = t.split(/\s+/);
-      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help  /clear  /compact  /context  /cost  /budget <usd>  /undo  /checkpoints  /engine <claude|opencode|ollama>  /expand  /exit    keys: shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help  /clear  /compact  /context  /cost  /budget <usd>  /undo  /checkpoints  /init  /model [name]  /engine <claude|opencode|ollama>  /expand  /exit\ninput:  @file inlines a file · !cmd runs a shell command · #note saves to NEXUS.md\nkeys:  shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history" });
       else if (cmd === "/clear" || cmd === "/new") { transcript.length = 0; transcript.push({ role: "system", text: "new chat  ·  Nexus  ·  " + engine + "  ·  " + cwd }); cont = false; oMsgs.length = 1; sess.ctxUsed = 0; }
       else if (cmd === "/compact") doCompact(false);
       else if (cmd === "/context") transcript.push({ role: "system", text: "context: " + fmtK(sess.ctxUsed) + " / " + fmtK(sess.ctxWindow) + " tokens (" + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "%)  ·  window " + fmtK(sess.ctxWindow) });
@@ -1369,6 +1386,8 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/budget") { const v = parseFloat(arg); if (arg && !isNaN(v) && v > 0) { costCap = v; transcript.push({ role: "system", text: "budget cap set to $" + v.toFixed(2) + " — turns pause when session cost reaches it" }); } else if (arg === "off" || arg === "0") { costCap = 0; transcript.push({ role: "system", text: "budget cap removed" }); } else transcript.push({ role: "system", text: "usage: /budget <usd>  (e.g. /budget 5.00, or /budget off)" }); }
       else if (cmd === "/undo") { if (!checkpoints.length) transcript.push({ role: "system", text: "nothing to undo (no checkpoints this session, or not a git repo)" }); else { const ck = checkpoints.pop(); const ok = nexusRestore(cwd, ck.tree); transcript.push({ role: "system", text: ok ? ("undid changes back to checkpoint before: \"" + ck.label + "\" — tracked files restored (any brand-new files were left in place)") : "undo failed (git error)" }); } }
       else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
+      else if (cmd === "/init") { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"), cfg = path.join(dir, "config.json"); const made = []; if (!fs.existsSync(md)) { fs.writeFileSync(md, "# Nexus project instructions\n\nNexus loads this file every session.\n\n## Project\n- (describe your project)\n\n## Conventions\n- (style, patterns to follow)\n\n## Build / run / test\n- (commands)\n"); made.push("NEXUS.md"); } if (!fs.existsSync(cfg)) { fs.writeFileSync(cfg, JSON.stringify({ engine, model: "" }, null, 2) + "\n"); made.push("config.json"); } transcript.push({ role: "system", text: made.length ? "initialized .nexus/ (" + made.join(", ") + ") — edit NEXUS.md to give Nexus project context" : ".nexus/ already exists" }); } catch (e) { transcript.push({ role: "system", text: "init failed: " + e.message }); } }
+      else if (cmd === "/model") { if (arg) { sess.model = arg; transcript.push({ role: "system", text: "model set to " + arg + (engine !== "ollama" ? " (note: the claude/opencode engines choose their own model)" : "") }); } else transcript.push({ role: "system", text: "current model: " + (sess.model || engine) }); }
       else if (cmd === "/expand") expanded = !expanded;
       else if (cmd === "/engine") { if (["claude", "opencode", "ollama"].includes(arg)) { engine = arg; sess.model = arg; sess.ctxWindow = CTXW[arg] || 200000; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "engine switched to " + arg + " (fresh conversation)" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode|ollama" }); }
       else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
@@ -1389,26 +1408,30 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x1b[B") { if (history.length) { hIdx = Math.min(history.length, hIdx + 1); input = history[hIdx] || ""; render(); } return; } // down
       if (s.charCodeAt(0) === 27) return;                                // other escapes
       for (const ch of s) {
-        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { handleSlash(t); render(); return; } if (t) { submit(t); return; } render(); }
+        if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { handleSlash(t); render(); return; } if (t[0] === "!" && t.length > 1) { runBang(t.slice(1).trim()); render(); return; } if (t[0] === "#" && t.length > 1) { addMemory(t.slice(1).trim()); render(); return; } if (t) { submit(t); return; } render(); }
         else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
         else if (ch >= " ") { input += ch; render(); }
       }
     });
-    out.on("resize", () => { if (!loading) render(); });
+    out.on("resize", onResize);
     // ---- boot loading animation ----
     (function boot() {
       const bspin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], word = "N E X U S", pool = "01<>[]{}#@$%&*/\\=+ABCDEF";
       const steps = ["linking " + engine + " engine", "loading tools", "priming context", "ready"];
+      const grad = ["38;5;51", "38;5;45", "38;5;81", "38;5;75", "38;5;99", "38;5;135", "38;5;171", "38;5;170", "38;5;207"];
+      const gtitle = (s) => useColor ? s.split("").map((ch, i) => "\x1b[1;" + grad[i % grad.length] + "m" + ch).join("") + "\x1b[0m" : s;
       let f = 0; const total = 24;
       const t = setInterval(() => {
         const C = cols(), R = rows(), cx = (C / 2) | 0, cy = (R / 2) | 0;
         let title = ""; for (let k = 0; k < word.length; k++) title += (word[k] === " " || k < (f / total) * word.length) ? word[k] : pool[(Math.random() * pool.length) | 0];
+        const done = f >= total;
         const bar = Math.round((f / total) * 22);
         const put = (row, str, vis) => ESC + "[" + row + ";" + Math.max(1, cx - (((vis || str.length) / 2) | 0)) + "H" + str;
         let b = ESC + "[2J";
-        b += put(cy - 1, cyan(bspin[f % bspin.length]) + "  " + bold(title), word.length + 3);
-        b += put(cy + 1, gray("[") + cyan("█".repeat(bar)) + gray("░".repeat(22 - bar)) + gray("]"), 24);
-        b += put(cy + 3, gray(steps[Math.min(steps.length - 1, ((f / total) * steps.length) | 0)] + "…"), 22);
+        b += put(cy - 2, cyan(bspin[f % bspin.length]) + "  " + (done ? gtitle(title) : bold(title)), word.length + 3);
+        b += put(cy, dim(gray("A I   c o d i n g   a g e n t")), 25);
+        b += put(cy + 2, gray("[") + cyan("█".repeat(bar)) + gray("░".repeat(22 - bar)) + gray("]"), 24);
+        b += put(cy + 4, gray(steps[Math.min(steps.length - 1, ((f / total) * steps.length) | 0)] + "…"), 22);
         out.write(b);
         if (++f > total) { clearInterval(t); loading = false; out.write(ESC + "[2J"); render(); }
       }, 55);
