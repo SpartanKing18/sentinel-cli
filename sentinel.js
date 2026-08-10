@@ -720,7 +720,7 @@ async function cli(args) {
   else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
-  else if (cmd === "nexus" || cmd === "code" || cmd === "ai") await aiCoder(rest.join(" "));
+  else if (cmd === "nexus" || cmd === "code" || cmd === "ai") await aiCoder(rest);
   else usage();
 }
 
@@ -757,44 +757,108 @@ function coderShell(command, cwd) {
     p.on("error", (e) => { clearTimeout(to); resolve({ code: -1, output: "spawn error: " + e.message }); });
   });
 }
-async function aiCoder(initialPrompt) {
+function nexusHelp() {
+  banner();
+  console.log("  " + bold("Nexus") + " — terminal AI coding agent (local Ollama)\n");
+  console.log("  " + bold("USAGE"));
+  console.log("    sentinel nexus [options] [task]     one-shot task, or interactive REPL if no task given");
+  console.log("    sentinel nexus                      interactive session\n");
+  console.log("  " + bold("OPTIONS"));
+  console.log("    -m, --model <name>                 model to use (default: best local coder model)");
+  console.log("    -y, --yes, --skip-permissions      auto-approve all file writes and commands");
+  console.log("        --print                        headless: run one task, print the result, exit");
+  console.log("    -h, --help                         show this help\n");
+  console.log("  " + bold("IN-SESSION COMMANDS"));
+  console.log("    /help          list commands           /model [name]  show or switch model");
+  console.log("    /auto          toggle auto-approve      /clear         reset the conversation");
+  console.log("    /exit          quit\n");
+  console.log("  " + bold("ENV") + "   SENTINEL_MODEL (default model) · OLLAMA_HOST / OLLAMA_PORT (remote Ollama)\n");
+  console.log("  " + gray("Nexus reads & writes files and runs commands in the current folder. Local models only — private.") + "\n");
+}
+
+async function aiCoder(argv) {
   const fs = require("fs"), path = require("path");
   const cwd = process.cwd();
+  // ---- parse flags ----
+  const arr = Array.isArray(argv) ? argv.slice() : String(argv || "").split(/\s+/).filter(Boolean);
+  let autoApprove = false, printMode = false, modelOverride = "", parts = [];
+  for (let i = 0; i < arr.length; i++) {
+    const a = arr[i];
+    if (a === "-y" || a === "--yes" || a === "--skip-permissions" || a === "--dangerously-skip-permissions") autoApprove = true;
+    else if (a === "--print") { printMode = true; autoApprove = true; }
+    else if (a === "-m" || a === "--model") modelOverride = arr[++i] || "";
+    else if (a === "-h" || a === "--help") return nexusHelp();
+    else parts.push(a);
+  }
   const ms = await ollamaTags();
-  if (!ms.length) { banner(); console.log("  " + red("No local model found. Install Ollama (https://ollama.com), then e.g. `ollama pull qwen2.5-coder` or `ollama pull hermes3`.")); return; }
-  const model = process.env.SENTINEL_MODEL || pickCoderModel(ms);
-  banner(); h1("Nexus — AI coder");
-  console.log("  " + gray("model ") + mag(model) + gray("   workdir ") + cyan(cwd));
-  console.log("  " + gray("Reads/writes files and runs commands right here. Type a task; 'exit' to quit.\n"));
+  if (!ms.length) { if (!printMode) banner(); console.log("  " + red("No local model found. Install Ollama (https://ollama.com), then `ollama pull qwen2.5-coder` or `ollama pull hermes3`.")); return; }
+  let model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms);
+  if (!printMode) {
+    banner(); h1("Nexus — AI coder");
+    console.log("  " + gray("model ") + mag(model) + gray("   workdir ") + cyan(cwd) + (autoApprove ? "   " + gray("auto-approve ON") : ""));
+    console.log("  " + gray("Reads & writes files and runs commands here. /help for commands, /exit to quit.\n"));
+  }
   const SYS = "You are Nexus, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
   const messages = [{ role: "system", content: SYS }];
-  let task = (initialPrompt || "").trim();
+  // ---- permission gate (Glitch-style): confirm risky actions unless auto-approve ----
+  async function approve(label) {
+    if (autoApprove) return true;
+    const ans = (await ask(cyan("  approve ") + label + gray("  [y]es / [n]o / [a]lways: "))).trim().toLowerCase();
+    if (ans === "a" || ans === "always") { autoApprove = true; return true; }
+    return ans === "" || ans === "y" || ans === "yes";
+  }
+  let task = parts.join(" ").trim();
   while (true) {
-    if (!task) { task = await ask("task>"); if (!task || /^(exit|quit|q)$/i.test(task)) { console.log("\n  " + gray("stay sharp.") + "\n"); return; } }
+    if (!task) {
+      if (printMode) return;
+      const t = (await ask("nexus>")).trim();
+      if (!t) { task = ""; continue; }
+      if (/^\/?(exit|quit|q)$/i.test(t)) { console.log("\n  " + gray("stay sharp.") + "\n"); return; }
+      if (t === "/help") { nexusHelp(); continue; }
+      if (t === "/auto") { autoApprove = !autoApprove; console.log("  " + gray("auto-approve " + (autoApprove ? "ON" : "OFF"))); continue; }
+      if (t === "/clear") { messages.length = 1; console.log("  " + gray("conversation cleared")); continue; }
+      if (t.startsWith("/model")) { const m = t.split(/\s+/)[1]; if (m) { model = m; console.log("  " + gray("model -> " + m)); } else console.log("  " + gray("model: " + model + gray("  available: " + ms.join(", ")))); continue; }
+      if (t.startsWith("/")) { console.log("  " + gray("unknown command; try /help")); continue; }
+      task = t;
+    }
     messages.push({ role: "user", content: task }); task = "";
     let didTool = false, nudges = 0;
     for (let step = 1; step <= 40; step++) {
       let raw; try { raw = await ollamaChat(model, messages, CODER_SCHEMA); } catch (e) { console.log("  " + red(e.message)); break; }
       let o; try { o = JSON.parse(raw); } catch (_) { messages.push({ role: "tool", content: "Reply with valid schema JSON only." }); continue; }
       messages.push({ role: "assistant", content: raw });
-      if (o.thought) console.log("  " + gray("• " + o.thought));
+      if (o.thought && !printMode) console.log("  " + gray("- " + o.thought));
       if (o.action === "final") {
         if (!didTool && nudges++ < 3) { messages.push({ role: "tool", content: "You have not taken any action yet. Do the real work first." }); continue; }
-        console.log("\n  " + green("✓ ") + bold(o.final || "done") + "\n"); break;
+        console.log("\n  " + green("done: ") + bold(o.final || "done") + "\n"); break;
       }
       const name = o.tool, a = o.args || {}; let result;
       try {
-        if (name === "read_file") { const t = fs.readFileSync(path.resolve(cwd, a.path), "utf8"); result = { content: t.slice(0, 16000) }; console.log("  " + cyan("read ") + a.path); }
-        else if (name === "write_file") { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines)")); }
-        else if (name === "edit_file") { const fp = path.resolve(cwd, a.path); let t = fs.readFileSync(fp, "utf8"); if (!t.includes(a.find)) { result = { error: "find text not present in file" }; } else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; console.log("  " + green("edit ") + a.path); } }
-        else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; console.log("  " + cyan("ls ") + (a.path || ".")); }
-        else if (name === "run_command") { console.log("  " + mag("$ ") + a.command); const r = await coderShell(a.command, cwd); result = { code: r.code, output: r.output }; if (r.output) console.log(r.output.split("\n").slice(0, 20).map((l) => "    " + gray(l)).join("\n")); }
+        if (name === "read_file") { const t = fs.readFileSync(path.resolve(cwd, a.path), "utf8"); result = { content: t.slice(0, 16000) }; if (!printMode) console.log("  " + cyan("read ") + a.path); }
+        else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; if (!printMode) console.log("  " + cyan("ls ") + (a.path || ".")); }
+        else if (name === "write_file") {
+          if (!(await approve("write " + a.path))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.path); }
+          else { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines)")); }
+        }
+        else if (name === "edit_file") {
+          const fp = path.resolve(cwd, a.path); let t;
+          try { t = fs.readFileSync(fp, "utf8"); } catch (_) { t = null; }
+          if (t == null) { result = { error: "cannot read " + a.path }; }
+          else if (!t.includes(a.find)) { result = { error: "find text not present in file" }; }
+          else if (!(await approve("edit " + a.path))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.path); }
+          else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; console.log("  " + green("edit ") + a.path); }
+        }
+        else if (name === "run_command") {
+          if (!(await approve("run: " + a.command))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.command); }
+          else { console.log("  " + mag("$ ") + a.command); const r = await coderShell(a.command, cwd); result = { code: r.code, output: r.output }; if (r.output && !printMode) console.log(r.output.split("\n").slice(0, 20).map((l) => "    " + gray(l)).join("\n")); }
+        }
         else { result = { error: "unknown tool '" + name + "' (use read_file/write_file/edit_file/list_dir/run_command)" }; }
       } catch (e) { result = { error: e.message }; }
       if (["read_file", "write_file", "edit_file", "list_dir", "run_command"].includes(name)) didTool = true;
       messages.push({ role: "tool", content: JSON.stringify(result).slice(0, 16000) });
       if (step === 40) console.log("  " + red("(step limit reached)"));
     }
+    if (printMode) return;
   }
 }
 
@@ -804,7 +868,7 @@ function usage() {
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
-    nexus [task]                      Nexus — AI coding agent (local Ollama): edits files & runs commands
+    nexus [opts] [task]               Nexus AI coder (local Ollama): -y skip prompts, --print headless, -m <model>, --help
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
