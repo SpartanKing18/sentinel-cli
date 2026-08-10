@@ -1367,7 +1367,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
     const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
-    let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false, redact = false; // interruption, budget, rate-limit, paste, bell, cloud redaction
+    let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false, redact = false, offline = false; // interruption, budget, rate-limit, paste, bell, cloud redaction, offline lock
     const checkpoints = [], redoStack = [], pinned = new Set();       // { tree, label, ts }; pinned = sticky context files
     // interrupt controller: .stopped is polled by loops; .kids are killers (child procs / aborts) fired on ctrl+c
     const makeCtl = () => ({ stopped: false, kids: [], kill() { this.stopped = true; for (const k of this.kids.splice(0)) { try { k(); } catch (_) {} } } });
@@ -1386,7 +1386,8 @@ function nexusTui(engine, cwd, nexusMd) {
     const base = (pth) => String(pth || "").split("/").pop() || String(pth || "");
     const oneline = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > (n || 44) ? s.slice(0, (n || 44) - 1) + "…" : s; };
     // ---- NEXUS logo (gradient) + slash-command menu ----
-    const GRAD = ["38;5;51", "38;5;45", "38;5;81", "38;5;75", "38;5;135", "38;5;171"];
+    const THEMES = { aurora: ["38;5;51", "38;5;45", "38;5;81", "38;5;75", "38;5;135", "38;5;171"], matrix: ["38;5;46", "38;5;40", "38;5;34", "38;5;28", "38;5;40", "38;5;46"], sunset: ["38;5;226", "38;5;220", "38;5;214", "38;5;208", "38;5;202", "38;5;196"], ocean: ["38;5;45", "38;5;39", "38;5;38", "38;5;44", "38;5;33", "38;5;27"], violet: ["38;5;141", "38;5;135", "38;5;99", "38;5;105", "38;5;171", "38;5;177"], mono: ["38;5;252", "38;5;248", "38;5;245", "38;5;242", "38;5;240", "38;5;238"] };
+    let GRAD = THEMES.aurora;
     const gline = (s, i) => useColor ? "\x1b[1;" + GRAD[i % GRAD.length] + "m" + s + "\x1b[0m" : s;
     const ART = [
       "  ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
@@ -1408,6 +1409,8 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/secrets", "scan the repo for leaked credentials"], ["/scan", "quick TCP port scan of a host"], ["/notify", "bell + desktop alert on long turns"],
       ["/watch", "run a cmd; auto-fix & re-run until it passes"], ["/commit", "AI commit message + commit the diff"], ["/diff", "colored session diff vs HEAD"],
       ["/pin", "keep a file in context every turn"], ["/pins", "list pinned files"], ["/unpin", "remove a pinned file"], ["/redact", "mask secrets before cloud sends"],
+      ["/ensemble", "all engines answer, then synthesize the best"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
+      ["/tree", "show the project file tree"], ["/theme", "change the color theme"], ["/offline", "local-only privacy lock"],
       ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
     // Custom project slash commands (Claude-Code / Glitch style): each .md file in
@@ -1504,6 +1507,7 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (rate && rate.isUsingOverage) parts.push(yellow("overage"));
       if (pinned.size) parts.push(cyan(pinned.size + " pinned"));
       if (redact) parts.push(yellow("redact"));
+      if (offline) parts.push(green("offline"));
       parts.push(MODES[mode].c(MODES[mode].k));
       return "  " + clip(parts.join(gray("  ·  ")), cols() - 3);
     };
@@ -1763,6 +1767,29 @@ function nexusTui(engine, cwd, nexusMd) {
         card.status = "ok"; card.end = Date.now(); ensureText().full = "second opinion (" + re + "):\n\n" + (out || "(no output)").trim(); busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
       })();
     };
+    // ask one engine a question (no file changes) — used by /ensemble
+    const engineAnswer = async (e, prompt) => { try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); return await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } return (await runEngineTask(e, prompt, cwd, false, false, null, ctl)).output; } catch (err) { return "error: " + err.message; } };
+    // /ensemble — run the prompt on every engine, then synthesize the single best answer
+    const ensembleEngines = (prompt) => {
+      const avail = []; if (hasBin("claude") && !offline) avail.push("claude"); avail.push("ollama");
+      const members = [...new Set([offline ? "ollama" : engine].concat(avail))].slice(0, 3);
+      transcript.push({ role: "user", text: "/ensemble  " + prompt });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Ensembling"; ctl = makeCtl();
+      const cards = members.map((e, i) => ({ type: "tool", id: "en" + i, name: "Task", label: "Task(" + e + ")", status: "run", start: Date.now(), detail: e }));
+      const synth = { type: "tool", id: "syn", name: "Task", label: "Task(synthesize)", status: "run", start: Date.now() };
+      cards.forEach((c) => block.items.push(c)); startTick(); render();
+      Promise.all(members.map((e, i) => Promise.race([engineAnswer(e, prompt).then((o) => ({ e, o: (o || "").trim() })), new Promise((r) => setTimeout(() => r({ e, o: "(no response within 60s)" }), 60000))]).then((r) => { cards[i].status = "ok"; cards[i].end = Date.now(); render(); return r; })))
+        .then(async (res) => {
+          synth.start = Date.now(); block.items.push(synth); render();
+          const se = offline ? "ollama" : engine;
+          const sp = "You are given " + res.length + " candidate answers to the same question from different AI models. Produce the SINGLE best answer, combining their strengths and fixing any mistakes. Be direct.\n\nQUESTION:\n" + prompt + "\n\n" + res.map((r, i) => "=== candidate " + (i + 1) + " (" + r.e + ") ===\n" + r.o).join("\n\n") + "\n\nReturn ONLY the final best answer.";
+          let best; try { best = await engineAnswer(se, sp); } catch (_) { best = res[0] && res[0].o; }
+          synth.status = "ok"; synth.end = Date.now();
+          ensureText().full = "best-of-" + res.length + " (synthesized by " + se + "):\n\n" + (best || "(no output)").trim();
+          busy = false; ctl = null; block.summary = res.length + " engines + synthesis  ·  " + ((Date.now() - t0) / 1000).toFixed(1) + "s"; try { saveSession(); } catch (_) {} render();
+        });
+    };
     // /watch <cmd> — run a command; if it fails, have the engine fix the code and re-run, up to 5 tries
     const watchFix = (command) => {
       transcript.push({ role: "user", text: "/watch  " + command });
@@ -1816,7 +1843,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race (all engines) · /review [engine] · /watch <cmd> (auto-fix loop) · /commit · /diff · /pin <file> · /secrets · /scan <host> · /agents a ;; b · /redact · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race · /ensemble (synthesize best) · /review · /watch (auto-fix) · /commit · /diff · /explain · /test <file> · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -1850,11 +1877,17 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/unpin") { if (arg && pinned.delete(arg)) transcript.push({ role: "system", text: "unpinned " + arg }); else if (arg === "all") { pinned.clear(); transcript.push({ role: "system", text: "unpinned all" }); } else transcript.push({ role: "system", text: "not pinned: " + arg + "  (/unpin all clears everything)" }); }
       else if (cmd === "/pins") transcript.push({ role: "system", text: pinned.size ? ("pinned files (in context every turn):\n" + [...pinned].map((f) => "  " + f).join("\n")) : "no pinned files — /pin <file> to add one" });
       else if (cmd === "/redact") { redact = !redact; transcript.push({ role: "system", text: "cloud redaction " + (redact ? "ON — secrets (API keys, tokens, private keys) are masked before anything is sent to a cloud engine (claude/opencode); local engine is unaffected" : "off") }); }
+      else if (cmd === "/ensemble") { if (!argstr) transcript.push({ role: "system", text: "usage: /ensemble <prompt> — asks every engine, then synthesizes the single best answer" }); else ensembleEngines(argstr); }
+      else if (cmd === "/explain") { if (arg) submit("Explain, in plain English, what @" + arg + " does and how it works. Do not modify anything."); else { let d = ""; try { d = _cp.execSync("git -c color.ui=never diff HEAD", { cwd, encoding: "utf8" }); } catch (_) {} if (!d.trim()) transcript.push({ role: "system", text: "no uncommitted changes to explain — try /explain <file>" }); else submit("Explain, in plain English, what these uncommitted changes do (do not modify anything):\n\n" + d.slice(0, 8000)); } }
+      else if (cmd === "/test") { if (!arg) transcript.push({ role: "system", text: "usage: /test <file> — generate thorough unit tests for it and run them" }); else submit("Write thorough unit tests for @" + arg + ", save them in this project's conventional test location/framework, then run the tests."); }
+      else if (cmd === "/tree") { const root = path.resolve(cwd, arg || "."); const out = { lines: [], count: 0 }; const walk = (dir, prefix, depth) => { if (depth > 4 || out.count > 250) return; let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; } ents = ents.filter((e) => !/^(\.git|node_modules|\.nexus|dist|build|\.cache|\.next|target|__pycache__)$/.test(e.name)).sort((a, b) => (b.isDirectory() - a.isDirectory()) || a.name.localeCompare(b.name)); ents.forEach((e, i) => { if (out.count > 250) return; const last = i === ents.length - 1; out.lines.push(prefix + (last ? "└─ " : "├─ ") + e.name + (e.isDirectory() ? "/" : "")); out.count++; if (e.isDirectory()) walk(path.join(dir, e.name), prefix + (last ? "   " : "│  "), depth + 1); }); }; walk(root, "", 0); transcript.push({ role: "system", text: (arg || ".") + "/\n" + (out.lines.join("\n") || "(empty)") + (out.count > 250 ? "\n… (truncated at 250 entries)" : "") }); }
+      else if (cmd === "/theme") { if (arg && THEMES[arg]) { GRAD = THEMES[arg]; transcript.push({ role: "system", text: "theme set to " + arg + " — the logo & boot gradient now use it" }); } else transcript.push({ role: "system", text: "themes:  " + Object.keys(THEMES).join("  ·  ") + "\nuse /theme <name>" }); }
+      else if (cmd === "/offline") { offline = !offline; if (offline && PAID[engine]) { engine = "ollama"; sess.model = "ollama"; sess.ctxWindow = CTXW.ollama || 8192; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "offline lock ON — switched to the local engine; cloud engines (claude/opencode) are blocked and nothing leaves this machine" }); } else transcript.push({ role: "system", text: offline ? "offline lock ON — cloud engines blocked; nothing leaves this machine" : "offline lock off — cloud engines allowed again" }); }
       else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
       else if (cmd === "/init") { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"), cfg = path.join(dir, "config.json"); const made = []; if (!fs.existsSync(md)) { fs.writeFileSync(md, "# Nexus project instructions\n\nNexus loads this file every session.\n\n## Project\n- (describe your project)\n\n## Conventions\n- (style, patterns to follow)\n\n## Build / run / test\n- (commands)\n"); made.push("NEXUS.md"); } if (!fs.existsSync(cfg)) { fs.writeFileSync(cfg, JSON.stringify({ engine, model: "" }, null, 2) + "\n"); made.push("config.json"); } transcript.push({ role: "system", text: made.length ? "initialized .nexus/ (" + made.join(", ") + ") — edit NEXUS.md to give Nexus project context" : ".nexus/ already exists" }); } catch (e) { transcript.push({ role: "system", text: "init failed: " + e.message }); } }
       else if (cmd === "/model") { if (arg) { sess.model = arg; transcript.push({ role: "system", text: "model set to " + arg + (engine !== "ollama" ? " (note: the claude/opencode engines choose their own model)" : "") }); } else transcript.push({ role: "system", text: "current model: " + (sess.model || engine) }); }
       else if (cmd === "/expand") expanded = !expanded;
-      else if (cmd === "/engine") { if (["claude", "opencode", "ollama"].includes(arg)) { engine = arg; sess.model = arg; sess.ctxWindow = CTXW[arg] || 200000; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; warned50 = false; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "engine switched to " + arg + " — the cost meter now tracks " + (PAID[arg] ? arg + " (billed)" : arg + " (local · free)") + "; fresh conversation" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode|ollama" }); }
+      else if (cmd === "/engine") { if (offline && (arg === "claude" || arg === "opencode")) { transcript.push({ role: "system", text: "offline lock is ON — cloud engines are blocked. Turn it off with /offline first." }); } else if (["claude", "opencode", "ollama"].includes(arg)) { engine = arg; sess.model = arg; sess.ctxWindow = CTXW[arg] || 200000; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; warned50 = false; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "engine switched to " + arg + " — the cost meter now tracks " + (PAID[arg] ? arg + " (billed)" : arg + " (local · free)") + "; fresh conversation" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode|ollama" }); }
       else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
     };
     // ---- input / keys ----
@@ -1911,7 +1944,7 @@ function nexusTui(engine, cwd, nexusMd) {
     (function boot() {
       const bspin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], word = "N E X U S", pool = "01<>[]{}#@$%&*/\\=+ABCDEF";
       const steps = ["linking " + engine + " engine", "loading tools", "priming context", "ready"];
-      const grad = ["38;5;51", "38;5;45", "38;5;81", "38;5;75", "38;5;99", "38;5;135", "38;5;171", "38;5;170", "38;5;207"];
+      const grad = GRAD;
       const gtitle = (s) => useColor ? s.split("").map((ch, i) => "\x1b[1;" + grad[i % grad.length] + "m" + ch).join("") + "\x1b[0m" : s;
       let f = 0; const total = 24;
       const t = setInterval(() => {
