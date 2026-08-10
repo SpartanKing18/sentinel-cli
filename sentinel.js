@@ -21,7 +21,7 @@ const VERSION = "2.29.0";
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const A = { reset: "\x1b[0m", b: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", green: "\x1b[32m", red: "\x1b[31m", yellow: "\x1b[33m", mag: "\x1b[35m", gray: "\x1b[90m", blue: "\x1b[34m" };
 const p = (code, s) => (useColor ? code + s + A.reset : s);
-const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s);
+const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -938,6 +938,72 @@ function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk) {
     p.on("error", (e) => { clearTimeout(to); resolve({ ok: false, output: "engine spawn error: " + e.message + " (is '" + engine + "' installed & logged in?)" }); });
   });
 }
+// Claude Code stream-json driver — parses NDJSON events so the TUI can render
+// tool cards, live token usage, cost and context size exactly like Claude Code.
+function runClaudeStream(prompt, cwd, cont, h, ctl) {
+  return new Promise((resolve) => {
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
+    if (cont) args.push("--continue");
+    const cp = _cp.spawn("claude", args, { cwd, env: process.env });
+    let buf = "", finalText = "", res = null, killed = false;
+    if (ctl) ctl.kill = () => { killed = true; try { cp.kill("SIGINT"); } catch (_) {} setTimeout(() => { try { cp.kill("SIGKILL"); } catch (_) {} }, 1500); };
+    cp.stdout.on("data", (d) => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let ev; try { ev = JSON.parse(line); } catch (_) { continue; }
+        if (ev.type === "system" && ev.subtype === "init") { h.onInit && h.onInit(ev); }
+        else if (ev.type === "rate_limit_event") { h.onRateLimit && h.onRateLimit(ev.rate_limit_info || {}); }
+        else if (ev.type === "assistant" && ev.message) {
+          for (const c of ev.message.content || []) {
+            if (c.type === "text" && c.text) { finalText += c.text; h.onText && h.onText(c.text); }
+            else if (c.type === "thinking" && c.thinking) { h.onThinking && h.onThinking(c.thinking); }
+            else if (c.type === "tool_use") { h.onTool && h.onTool({ id: c.id, name: c.name, input: c.input || {} }); }
+          }
+          if (ev.message.usage) h.onUsage && h.onUsage(ev.message.usage, ev.message.model);
+        }
+        else if (ev.type === "user" && ev.message) {
+          for (const c of ev.message.content || []) if (c.type === "tool_result") h.onToolResult && h.onToolResult({ id: c.tool_use_id, content: c.content, isError: c.is_error });
+        }
+        else if (ev.type === "result") { res = ev; if (ev.result && !finalText.trim()) finalText = ev.result; h.onResult && h.onResult(ev); }
+      }
+    });
+    cp.stderr.on("data", () => {});
+    const to = setTimeout(() => { try { cp.kill("SIGKILL"); } catch (_) {} }, 40 * 60 * 1000);
+    cp.on("close", (code) => { clearTimeout(to); resolve({ ok: code === 0 && !killed, interrupted: killed, output: finalText, result: res }); });
+    cp.on("error", (e) => { clearTimeout(to); resolve({ ok: false, output: "engine spawn error: " + e.message + " (is claude installed & logged in?)" }); });
+  });
+}
+// Safe, non-destructive git checkpoint (captures tracked + untracked into a tree
+// object using a temp index; never touches HEAD/index/history). /undo restores
+// tracked file contents to the snapshot and never deletes anything.
+function nexusCheckpoint(cwd) {
+  try {
+    const path = require("path"), fs = require("fs");
+    _cp.execSync("git rev-parse --is-inside-work-tree", { cwd, stdio: "ignore" });
+    const idx = path.join(cwd, ".nexus", "ckpt.index");
+    fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true });
+    try { fs.unlinkSync(idx); } catch (_) {}
+    const env = Object.assign({}, process.env, { GIT_INDEX_FILE: idx });
+    _cp.execSync("git add -A", { cwd, env, stdio: "ignore" });
+    const tree = _cp.execSync("git write-tree", { cwd, env }).toString().trim();
+    try { fs.unlinkSync(idx); } catch (_) {}
+    return tree || null;
+  } catch (_) { return null; }
+}
+function nexusRestore(cwd, tree) {
+  try {
+    const path = require("path"), fs = require("fs");
+    const idx = path.join(cwd, ".nexus", "restore.index");
+    const env = Object.assign({}, process.env, { GIT_INDEX_FILE: idx });
+    _cp.execSync("git read-tree " + tree, { cwd, env, stdio: "ignore" });
+    _cp.execSync("git checkout-index -a -f", { cwd, env, stdio: "ignore" });
+    try { fs.unlinkSync(idx); } catch (_) {}
+    return true;
+  } catch (_) { return false; }
+}
 function extractJson(text, fallback) {
   const s = String(text || ""); const arr = s.match(/\[[\s\S]*\]/), obj = s.match(/\{[\s\S]*\}/);
   for (const m of [arr, obj]) if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
@@ -1076,70 +1142,252 @@ async function nexusRun(argv) {
 }
 
 // Full-screen chat TUI (alt-screen, scrolling transcript, fixed bottom input box). No deps.
+// Whimsical status verbs — Claude Code's set PLUS Nexus-originals (marked below).
+const FORGE = ["Accomplishing", "Actioning", "Actualizing", "Baking", "Booping", "Brewing", "Calculating", "Cerebrating", "Channelling", "Churning", "Clauding", "Coalescing", "Cogitating", "Combobulating", "Computing", "Concocting", "Conjuring", "Considering", "Cooking", "Crafting", "Creating", "Crunching", "Deliberating", "Determining", "Discombobulating", "Divining", "Doing", "Effecting", "Elucidating", "Enchanting", "Envisioning", "Finagling", "Flibbertigibbeting", "Forging", "Forming", "Frolicking", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Hustling", "Ideating", "Imagining", "Incubating", "Inferring", "Jiving", "Kneading", "Manifesting", "Marinating", "Meandering", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating", "Perusing", "Philosophising", "Pondering", "Pontificating", "Processing", "Puttering", "Puzzling", "Reticulating", "Ruminating", "Scheming", "Schlepping", "Shimmying", "Shucking", "Simmering", "Smooshing", "Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing", "Thinking", "Tinkering", "Transmuting", "Unfurling", "Vibing", "Wandering", "Whirring", "Wibbling", "Wizarding", "Working", "Wrangling",
+  // Nexus-original verbs (built from scratch):
+  "Nexusing", "Weaving", "Orchestrating", "Constellating", "Tessellating", "Kindling", "Untangling", "Refracting", "Distilling", "Alchemizing", "Threading", "Warping", "Grokking", "Percussing", "Lucubrating", "Quantizing", "Foraging", "Splicing", "Braiding", "Zhuzhing"];
 function nexusTui(engine, cwd, nexusMd) {
   return new Promise((resolve) => {
     const out = process.stdout, ESC = "\x1b";
     const cols = () => out.columns || 80, rows = () => out.rows || 24;
-    const transcript = [{ role: "system", text: "Nexus  ·  " + engine + "  ·  " + cwd + "   —   type a message, Enter to send, /exit or Ctrl-C to quit" }];
-    let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", busyTimer = null;
-    const FORGE = ["Accomplishing", "Actioning", "Actualizing", "Baking", "Booping", "Brewing", "Calculating", "Cerebrating", "Channelling", "Churning", "Clauding", "Coalescing", "Cogitating", "Combobulating", "Computing", "Concocting", "Conjuring", "Considering", "Cooking", "Crafting", "Creating", "Crunching", "Deliberating", "Determining", "Discombobulating", "Divining", "Doing", "Effecting", "Elucidating", "Enchanting", "Envisioning", "Finagling", "Flibbertigibbeting", "Forging", "Forming", "Frolicking", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Hustling", "Ideating", "Imagining", "Incubating", "Inferring", "Jiving", "Manifesting", "Marinating", "Meandering", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating", "Perusing", "Philosophising", "Pondering", "Pontificating", "Processing", "Puttering", "Puzzling", "Reticulating", "Ruminating", "Scheming", "Schlepping", "Shimmying", "Shucking", "Simmering", "Smooshing", "Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing", "Thinking", "Tinkering", "Transmuting", "Unfurling", "Vibing", "Wandering", "Whirring", "Wibbling", "Wizarding", "Working", "Wrangling"];
-    const colorMd = (line, inCode) => { if (inCode) return gray(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => mag(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
+    const PAID = { claude: true, opencode: true, ollama: false };
+    const CTXW = { claude: 200000, opencode: 200000, ollama: 8192 };
+    const transcript = [{ role: "system", text: "Nexus  ·  " + engine + "  ·  " + cwd }];
+    const sess = { model: engine, ctxWindow: CTXW[engine] || 200000, ctxUsed: 0, inTok: 0, outTok: 0, cost: 0, liveOut: 0 };
+    const oMsgs = nexusMd ? [{ role: "system", content: "You are Nexus, a concise expert coding assistant.\n" + nexusMd }] : [{ role: "system", content: "You are Nexus, a concise expert coding assistant." }];
+    let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
+    let expanded = false, mode = 1, runningShells = 0, activeAgents = 0; // mode: 0 normal, 1 auto-accept, 2 plan
+    const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
+    const compact = { on: false, f: 0 };
+    const history = []; let hIdx = -1;
+    let ctl = null, costCap = 0, rate = null, warned50 = false;      // interruption, budget, rate-limit
+    const checkpoints = [];                                          // { tree, label, ts }
+    // ---- ansi-aware width helpers ----
+    const stripA = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+    const clip = (s, n) => { let o = "", v = 0; for (const part of String(s).split(/(\x1b\[[0-9;]*m)/)) { if (/^\x1b/.test(part)) { o += part; continue; } for (const ch of part) { if (v >= n) return o; o += ch; v++; } } return o; };
+    const fmtK = (n) => n >= 100000 ? (n / 1000).toFixed(0) + "k" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : "" + (n | 0);
+    const base = (pth) => String(pth || "").split("/").pop() || String(pth || "");
+    const oneline = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > (n || 44) ? s.slice(0, (n || 44) - 1) + "…" : s; };
+    // ---- inline markdown / command coloring ----
+    const paintCode = (c) => (/(^|\s)(node|npm|npx|git|python3?|pip3?|bash|sh|cd|ls|cat|make|cargo|go|docker|curl|grep|sed|rm|mkdir|chmod|sudo)\b/.test(c) || /\s--?\w/.test(c)) ? blue(c) : mag(c);
+    const colorMd = (line, inCode) => { if (inCode) return blue(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => paintCode(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
     const wrap = (text) => { const width = cols() - 4; const res = []; for (const para of String(text).replace(/\r/g, "").split("\n")) { let s = para; if (!s.length) { res.push(""); continue; } while (s.length > width) { res.push(s.slice(0, width)); s = s.slice(width); } res.push(s); } return res; };
+    // ---- tool-card labels (Claude-Code style) ----
+    const toolLabel = (name, a) => {
+      a = a || {};
+      if (name === "Write") return "Write(" + base(a.file_path) + ")";
+      if (name === "Edit" || name === "MultiEdit") return "Update(" + base(a.file_path) + ")";
+      if (name === "NotebookEdit") return "Notebook(" + base(a.notebook_path) + ")";
+      if (name === "Read") return "Read(" + base(a.file_path) + ")";
+      if (name === "Bash") return "Bash(" + oneline(a.command, 40) + ")" + (a.run_in_background ? gray(" &") : "");
+      if (name === "Grep") return "Grep(" + oneline(a.pattern, 30) + ")";
+      if (name === "Glob") return "Glob(" + oneline(a.pattern, 30) + ")";
+      if (name === "Task") return "Task(" + oneline(a.subagent_type || a.description || "agent", 30) + ")";
+      if (name === "WebFetch") return "Fetch(" + oneline(a.url, 36) + ")";
+      if (name === "WebSearch") return "Search(" + oneline(a.query, 34) + ")";
+      if (name === "TodoWrite" || name === "TaskCreate" || name === "TaskUpdate") return "Plan(update)";
+      if (String(name).startsWith("mcp__")) return String(name).replace(/^mcp__/, "").replace(/__/, ":") + "()";
+      const v = Object.values(a)[0]; return name + "(" + (v != null ? oneline(String(v), 34) : "") + ")";
+    };
+    const resultText = (c) => { if (c == null) return ""; if (typeof c === "string") return c; if (Array.isArray(c)) return c.map((x) => (x && x.text) || (typeof x === "string" ? x : "")).join(" "); return String(c); };
+    // ---- transcript block accessors ----
+    const cur = () => transcript[transcript.length - 1];
+    const ensureText = () => { const b = cur(); if (!b.items) b.items = []; let last = b.items[b.items.length - 1]; if (!last || last.type !== "text") { last = { type: "text", full: "", shown: 0 }; b.items.push(last); } return last; };
+    // ---- render body ----
+    const spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const bodyLines = () => {
       const L = [];
       for (const m of transcript) {
         if (m.role === "system") { L.push(gray(m.text)); L.push(""); continue; }
-        L.push(m.role === "user" ? mag("› you") : cyan("▎ nexus"));
-        if (m.role === "nexus" && busy && m === transcript[transcript.length - 1] && !m.text.trim()) {
+        if (m.role === "user") { L.push(mag("› ") + m.text); L.push(""); continue; }
+        // nexus turn: ordered items (text + tool cards)
+        L.push(cyan("● ") + bold("nexus") + gray("  " + engine));
+        for (const it of (m.items || [])) {
+          if (it.type === "text") {
+            const vis = it.full.slice(0, it.shown);
+            let inCode = false;
+            for (const ln of wrap(vis)) { if (/^```/.test(ln.trim())) { inCode = !inCode; L.push("  " + gray(ln)); continue; } L.push("  " + colorMd(ln, inCode)); }
+          } else if (it.type === "tool") {
+            const dot = it.status === "run" ? yellow(spin[(Date.now() / 90 | 0) % spin.length]) : it.status === "err" ? red("●") : green("●");
+            const secs = it.end ? ((it.end - it.start) / 1000).toFixed(1) + "s" : ((Date.now() - it.start) / 1000).toFixed(1) + "s";
+            L.push("  " + dot + " " + bold(it.label) + gray("  " + secs));
+            if (expanded && it.detail) for (const ln of wrap(it.detail).slice(0, 6)) L.push("    " + gray("⎿ " + ln));
+          }
+        }
+        // live status line while this turn is running
+        if (busy && m === cur()) {
           const el = Math.round((Date.now() - busyStart) / 1000);
-          L.push("  " + mag("✻ " + busyWord + "…") + gray("   " + el + "s"));
-        } else {
-          let inCode = false;
-          for (const ln of wrap(m.text)) { if (/^```/.test(ln.trim())) { inCode = !inCode; L.push("  " + gray(ln)); continue; } L.push("  " + (m.role === "nexus" ? colorMd(ln, inCode) : ln)); }
+          const tok = sess.liveOut ? " · " + fmtK(sess.liveOut) + " tokens" : "";
+          L.push("  " + mag(spin[(Date.now() / 90 | 0) % spin.length] + " " + busyWord + "…") + gray("  (" + el + "s" + tok + " · ctrl+c to stop)"));
+        } else if (m.summary) {
+          L.push("  " + dim(gray(m.summary)));
         }
         L.push("");
       }
       return L;
     };
+    // ---- status + hint bars ----
+    const statusBar = () => {
+      const ctxW = sess.ctxWindow || 200000;
+      const pct = Math.min(100, Math.round((sess.ctxUsed / ctxW) * 100));
+      const cells = 8, fill = Math.max(0, Math.min(cells, Math.round((pct / 100) * cells)));
+      const pc = pct >= 80 ? red : pct >= 50 ? yellow : cyan;
+      const bar = pc("▓".repeat(fill)) + gray("░".repeat(cells - fill));
+      const parts = [bold(sess.model || engine), gray("ctx ") + pc(pct + "%") + " " + bar, gray("↑") + fmtK(sess.inTok) + gray(" ↓") + fmtK(sess.outTok) + gray(" tok")];
+      if (PAID[engine]) { const c = costCap && sess.cost >= costCap ? red : green; parts.push(sess.cost ? c("$" + sess.cost.toFixed(4)) + (costCap ? gray("/" + costCap.toFixed(2)) : "") : gray("subscription")); }
+      else parts.push(green("local · free"));
+      if (runningShells) parts.push(yellow(runningShells + " shell" + (runningShells > 1 ? "s" : "")));
+      if (activeAgents) parts.push(mag(activeAgents + " agent" + (activeAgents > 1 ? "s" : "")));
+      if (rate && rate.status && rate.status !== "allowed") parts.push(red("rate-limited"));
+      else if (rate && rate.isUsingOverage) parts.push(yellow("overage"));
+      parts.push(MODES[mode].c(MODES[mode].k));
+      return "  " + clip(parts.join(gray("  ·  ")), cols() - 3);
+    };
+    const hint = () => {
+      if (compact.on) { const n = 22, f = Math.min(n, compact.f); return "  " + yellow("Compacting conversation… ") + gray("[") + cyan("▓".repeat(f)) + gray("░".repeat(n - f)) + gray("] ") + Math.round((f / n) * 100) + "%"; }
+      return "  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" cycle mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("/help");
+    };
     const render = () => {
       const C = cols(), R = rows(), iw = Math.max(4, C - 3);
       const wrapped = []; { let s = input; if (!s.length) wrapped.push(""); else while (s.length) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } }
       const inRows = Math.max(1, Math.min(wrapped.length, 8));
-      const bodyRows = Math.max(1, R - (inRows + 3)); // top rule + input rows + bottom rule + hint
+      const chrome = 1 /*status*/ + 1 /*rule*/ + inRows + 1 /*rule*/ + 1 /*hint*/;
+      const bodyRows = Math.max(1, R - chrome);
       const lines = bodyLines(), view = lines.slice(Math.max(0, lines.length - bodyRows));
       let b = ESC + "[H";
       for (let i = 0; i < bodyRows; i++) b += " " + (view[i] || "") + ESC + "[K\r\n";
+      b += statusBar() + ESC + "[K\r\n";
       b += gray("─".repeat(C)) + ESC + "[K\r\n";
       const shown = wrapped.slice(Math.max(0, wrapped.length - inRows));
-      for (let i = 0; i < inRows; i++) { const cur = (i === inRows - 1 && !busy) ? "█" : ""; b += (i === 0 ? bold(mag("❯ ")) : "  ") + (shown[i] || "") + cur + ESC + "[K\r\n"; }
+      for (let i = 0; i < inRows; i++) { const c = (i === inRows - 1 && !busy) ? "█" : ""; b += (i === 0 ? bold(mag("❯ ")) : "  ") + (shown[i] || "") + c + ESC + "[K\r\n"; }
       b += gray("─".repeat(C)) + ESC + "[K\r\n";
-      b += gray("  Enter send  ·  /help  ·  /exit") + ESC + "[K";
+      b += hint() + ESC + "[K";
       out.write(b);
     };
-    const cleanup = () => { if (busyTimer) clearInterval(busyTimer); try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
-    const submit = (text) => {
-      transcript.push({ role: "user", text }); transcript.push({ role: "nexus", text: "" });
-      const idx = transcript.length - 1; busy = true; busyStart = Date.now(); busyWord = FORGE[Math.floor(Math.random() * FORGE.length)];
-      if (busyTimer) clearInterval(busyTimer); busyTimer = setInterval(render, 1000); render();
-      runEngineTask(engine, text, cwd, true, cont, (chunk) => { transcript[idx].text += chunk; render(); })
-        .then((res) => { if (!transcript[idx].text.trim()) transcript[idx].text = (res && res.output) || "(no output)"; cont = true; busy = false; if (busyTimer) { clearInterval(busyTimer); busyTimer = null; } render(); });
+    // ---- animation loop: typewriter reveal + spinners + elapsed ----
+    const revealing = () => { const b = cur(); if (!b || !b.items) return false; return b.items.some((it) => it.type === "text" && it.shown < it.full.length); };
+    const startTick = () => { if (tick) return; tick = setInterval(() => { const b = cur(); if (b && b.items) for (const it of b.items) if (it.type === "text" && it.shown < it.full.length) it.shown = Math.min(it.full.length, it.shown + Math.max(2, Math.ceil((it.full.length - it.shown) / 22))); render(); if (!busy && !revealing() && !compact.on) { clearInterval(tick); tick = null; } }, 45); };
+    // ---- context compaction (visual + local prune) ----
+    const doCompact = (auto) => {
+      compact.on = true; compact.f = 0; startTick();
+      const iv = setInterval(() => {
+        compact.f += 1;
+        if (compact.f >= 22) {
+          clearInterval(iv);
+          const keep = transcript.slice(-6);
+          transcript.length = 0;
+          transcript.push({ role: "system", text: "[earlier conversation compacted to save context" + (auto ? " — auto at " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "%" : "") + "]" });
+          for (const k of keep) transcript.push(k);
+          compact.on = false; render();
+        } else render();
+      }, 60);
     };
+    const maybeAutoCompact = () => { if (sess.ctxUsed > 0.8 * (sess.ctxWindow || 200000) && !compact.on) doCompact(true); };
+    const cleanup = () => { if (tick) clearInterval(tick); try { process.stdin.setRawMode(false); } catch (_) {} process.stdin.pause(); process.stdin.removeAllListeners("data"); out.write(ESC + "[?25h" + ESC + "[?1049l"); };
+    // ---- engine turn ----
+    const submit = (text) => {
+      if (costCap && sess.cost >= costCap) { transcript.push({ role: "system", text: "budget reached ($" + sess.cost.toFixed(4) + " ≥ cap $" + costCap.toFixed(2) + ") — raise it with /budget <amount> to continue" }); render(); return; }
+      history.push(text); hIdx = history.length;
+      transcript.push({ role: "user", text });
+      const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + text : text;
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      const stat = { files: new Set(), cmds: 0, inTok0: sess.inTok, outTok0: sess.outTok, cost0: sess.cost, t0: Date.now() };
+      const ckTree = (mode !== 2 && engine !== "ollama") ? nexusCheckpoint(cwd) : null;
+      if (ckTree) checkpoints.push({ tree: ckTree, label: oneline(text, 40), ts: Date.now() });
+      busy = true; busyStart = Date.now(); busyWord = FORGE[Math.floor(Math.random() * FORGE.length)]; sess.liveOut = 0; ctl = {};
+      startTick(); render();
+      const finish = (res) => {
+        for (const it of block.items) if (it.type === "tool" && it.status === "run") { it.status = res && res.interrupted ? "err" : "ok"; it.end = Date.now(); }
+        runningShells = 0; activeAgents = 0; ctl = null;
+        if (!block.items.length && (!block.items.some((i) => i.type === "text" && i.full.trim()))) { const t = ensureText(); if (!t.full.trim()) t.full = res && res.interrupted ? "(interrupted)" : (res && res.output) || "(no output)"; }
+        const dt = ((Date.now() - stat.t0) / 1000).toFixed(1);
+        const din = sess.inTok - stat.inTok0, dout = sess.outTok - stat.outTok0, dcost = sess.cost - stat.cost0;
+        const bits = [];
+        if (stat.files.size) bits.push(stat.files.size + " file" + (stat.files.size > 1 ? "s" : ""));
+        if (stat.cmds) bits.push(stat.cmds + " cmd" + (stat.cmds > 1 ? "s" : ""));
+        bits.push("↑" + fmtK(din) + " ↓" + fmtK(dout) + " tok");
+        if (PAID[engine] && dcost > 0) bits.push("$" + dcost.toFixed(4));
+        bits.push(dt + "s");
+        if (ckTree) bits.push("undo #" + checkpoints.length);
+        block.summary = bits.join("  ·  ");
+        cont = true; busy = false; if (costCap && sess.cost >= costCap) transcript.push({ role: "system", text: "budget cap reached ($" + sess.cost.toFixed(4) + ") — /budget <amount> to raise" }); maybeAutoCompact(); render();
+      };
+      if (engine === "claude") {
+        runClaudeStream(promptText, cwd, cont, {
+          onInit: (ev) => { if (ev.model) sess.model = ev.model; },
+          onRateLimit: (info) => { rate = info; },
+          onText: (t) => { ensureText().full += t; render(); },
+          onTool: (tu) => {
+            block.items.push({ type: "tool", id: tu.id, name: tu.name, label: toolLabel(tu.name, tu.input), detail: JSON.stringify(tu.input).slice(0, 400), status: "run", start: Date.now() });
+            if (tu.name === "Bash") { runningShells++; stat.cmds++; }
+            if (tu.name === "Task") activeAgents++;
+            if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tu.name) && (tu.input.file_path || tu.input.notebook_path)) stat.files.add(base(tu.input.file_path || tu.input.notebook_path));
+            render();
+          },
+          onToolResult: (tr) => {
+            const it = block.items.find((x) => x.type === "tool" && x.id === tr.id);
+            if (it) { it.status = tr.isError ? "err" : "ok"; it.end = Date.now(); it.detail = oneline(resultText(tr.content), 260); if (it.name === "Bash" && runningShells) runningShells--; if (it.name === "Task" && activeAgents) activeAgents--; }
+            render();
+          },
+          onUsage: (u) => { sess.liveOut = u.output_tokens || sess.liveOut; },
+          onResult: (ev) => {
+            const u = ev.usage || {};
+            sess.inTok += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+            sess.outTok += u.output_tokens || 0;
+            sess.ctxUsed = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
+            if (typeof ev.total_cost_usd === "number") sess.cost += ev.total_cost_usd;
+            const mu = ev.modelUsage && ev.modelUsage[sess.model]; if (mu && mu.contextWindow) sess.ctxWindow = mu.contextWindow;
+          },
+        }, ctl).then(finish);
+      } else if (engine === "opencode") {
+        runEngineTask("opencode", promptText, cwd, true, cont, (chunk) => { ensureText().full += chunk; sess.liveOut += Math.ceil(chunk.length / 4); render(); })
+          .then((res) => { sess.inTok += Math.ceil(promptText.length / 4); sess.outTok += Math.ceil((res.output || "").length / 4); sess.ctxUsed = sess.inTok + sess.outTok; finish(res); });
+      } else { // ollama — conversational, local, free
+        oMsgs.push({ role: "user", content: promptText });
+        (async () => {
+          let text2 = "";
+          try {
+            let mdl = process.env.SENTINEL_MODEL || (sess.model !== engine ? sess.model : "");
+            if (!mdl) { mdl = pickCoderModel(await ollamaTags()); sess.model = mdl || engine; }
+            text2 = await ollamaChat(mdl, oMsgs);
+          } catch (e) { text2 = "model error: " + e.message; }
+          oMsgs.push({ role: "assistant", content: text2 });
+          const t = ensureText(); t.full = text2;
+          sess.inTok += Math.ceil(promptText.length / 4); sess.outTok += Math.ceil(text2.length / 4); sess.ctxUsed = sess.inTok + sess.outTok;
+          finish({ output: text2 });
+        })();
+      }
+    };
+    // ---- slash commands ----
+    const handleSlash = (t) => {
+      const [cmd, arg] = t.split(/\s+/);
+      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help  /clear  /compact  /context  /cost  /budget <usd>  /undo  /checkpoints  /engine <claude|opencode|ollama>  /expand  /exit    keys: shift+tab cycle mode · ctrl+o expand · ctrl+c stop turn · ↑/↓ history" });
+      else if (cmd === "/clear" || cmd === "/new") { transcript.length = 0; transcript.push({ role: "system", text: "new chat  ·  Nexus  ·  " + engine + "  ·  " + cwd }); cont = false; oMsgs.length = 1; sess.ctxUsed = 0; }
+      else if (cmd === "/compact") doCompact(false);
+      else if (cmd === "/context") transcript.push({ role: "system", text: "context: " + fmtK(sess.ctxUsed) + " / " + fmtK(sess.ctxWindow) + " tokens (" + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "%)  ·  window " + fmtK(sess.ctxWindow) });
+      else if (cmd === "/cost") transcript.push({ role: "system", text: PAID[engine] ? ("session: ↑" + fmtK(sess.inTok) + " in · ↓" + fmtK(sess.outTok) + " out" + (sess.cost ? " · $" + sess.cost.toFixed(4) : "") + (costCap ? " · cap $" + costCap.toFixed(2) : "")) : "engine is local (Ollama) — free, no token charges" });
+      else if (cmd === "/budget") { const v = parseFloat(arg); if (arg && !isNaN(v) && v > 0) { costCap = v; transcript.push({ role: "system", text: "budget cap set to $" + v.toFixed(2) + " — turns pause when session cost reaches it" }); } else if (arg === "off" || arg === "0") { costCap = 0; transcript.push({ role: "system", text: "budget cap removed" }); } else transcript.push({ role: "system", text: "usage: /budget <usd>  (e.g. /budget 5.00, or /budget off)" }); }
+      else if (cmd === "/undo") { if (!checkpoints.length) transcript.push({ role: "system", text: "nothing to undo (no checkpoints this session, or not a git repo)" }); else { const ck = checkpoints.pop(); const ok = nexusRestore(cwd, ck.tree); transcript.push({ role: "system", text: ok ? ("undid changes back to checkpoint before: \"" + ck.label + "\" — tracked files restored (any brand-new files were left in place)") : "undo failed (git error)" }); } }
+      else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
+      else if (cmd === "/expand") expanded = !expanded;
+      else if (cmd === "/engine") { if (["claude", "opencode", "ollama"].includes(arg)) { engine = arg; sess.model = arg; sess.ctxWindow = CTXW[arg] || 200000; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "engine switched to " + arg + " (fresh conversation)" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode|ollama" }); }
+      else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
+    };
+    // ---- input / keys ----
     out.write(ESC + "[?1049h" + ESC + "[?25l" + ESC + "[2J");
     try { process.stdin.setRawMode(true); } catch (_) {}
     process.stdin.resume(); process.stdin.setEncoding("utf8");
     let loading = true;
-    const handleSlash = (t) => {
-      const [cmd, arg] = t.split(/\s+/);
-      if (cmd === "/help") transcript.push({ role: "system", text: "commands:  /help   /clear (new chat)   /engine <claude|opencode>   /exit" });
-      else if (cmd === "/clear" || cmd === "/new") { transcript.length = 0; transcript.push({ role: "system", text: "new chat  ·  Nexus  ·  " + engine + "  ·  " + cwd }); cont = false; }
-      else if (cmd === "/engine") { if (arg === "claude" || arg === "opencode") { engine = arg; cont = false; transcript.push({ role: "system", text: "engine switched to " + arg + " (starting a fresh conversation)" }); } else transcript.push({ role: "system", text: "usage: /engine claude|opencode" }); }
-      else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
-    };
     process.stdin.on("data", (d) => {
-      if (loading || busy) return;
+      if (loading) return;
       const s = String(d);
-      if (s === "\x03") { cleanup(); resolve(); return; }
-      if (s.charCodeAt(0) === 27) return; // ignore escape sequences (arrows, etc.)
+      if (s === "\x03") { if (busy && ctl && ctl.kill) { ctl.kill(); transcript.push({ role: "system", text: "interrupting current turn…" }); render(); return; } cleanup(); resolve(); return; } // ctrl+c: stop turn if running, else quit
+      if (s === "\x1b[Z") { mode = (mode + 1) % MODES.length; render(); return; } // shift+tab
+      if (s === "\x0f") { expanded = !expanded; render(); return; }      // ctrl+o
+      if (busy) return;                                                  // ignore typing mid-turn (except ctrl+c/o/shift-tab)
+      if (s === "\x1b[A") { if (history.length) { hIdx = Math.max(0, hIdx - 1); input = history[hIdx] || ""; render(); } return; } // up
+      if (s === "\x1b[B") { if (history.length) { hIdx = Math.min(history.length, hIdx + 1); input = history[hIdx] || ""; render(); } return; } // down
+      if (s.charCodeAt(0) === 27) return;                                // other escapes
       for (const ch of s) {
         if (ch === "\r" || ch === "\n") { const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { handleSlash(t); render(); return; } if (t) { submit(t); return; } render(); }
         else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
@@ -1147,17 +1395,18 @@ function nexusTui(engine, cwd, nexusMd) {
       }
     });
     out.on("resize", () => { if (!loading) render(); });
+    // ---- boot loading animation ----
     (function boot() {
-      const spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], word = "N E X U S", pool = "01<>[]{}#@$%&*/\\=+ABCDEF";
+      const bspin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], word = "N E X U S", pool = "01<>[]{}#@$%&*/\\=+ABCDEF";
       const steps = ["linking " + engine + " engine", "loading tools", "priming context", "ready"];
       let f = 0; const total = 24;
       const t = setInterval(() => {
         const C = cols(), R = rows(), cx = (C / 2) | 0, cy = (R / 2) | 0;
         let title = ""; for (let k = 0; k < word.length; k++) title += (word[k] === " " || k < (f / total) * word.length) ? word[k] : pool[(Math.random() * pool.length) | 0];
         const bar = Math.round((f / total) * 22);
-        const put = (row, s, vis) => ESC + "[" + row + ";" + Math.max(1, cx - (((vis || s.length) / 2) | 0)) + "H" + s;
+        const put = (row, str, vis) => ESC + "[" + row + ";" + Math.max(1, cx - (((vis || str.length) / 2) | 0)) + "H" + str;
         let b = ESC + "[2J";
-        b += put(cy - 1, cyan(spin[f % spin.length]) + "  " + bold(title), word.length + 3);
+        b += put(cy - 1, cyan(bspin[f % bspin.length]) + "  " + bold(title), word.length + 3);
         b += put(cy + 1, gray("[") + cyan("█".repeat(bar)) + gray("░".repeat(22 - bar)) + gray("]"), 24);
         b += put(cy + 3, gray(steps[Math.min(steps.length - 1, ((f / total) * steps.length) | 0)] + "…"), 22);
         out.write(b);
