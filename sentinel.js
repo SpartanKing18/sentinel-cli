@@ -15,7 +15,7 @@ const crypto = require("crypto");
 const readline = require("readline");
 const os = require("os");
 const dnsp = require("dns").promises;
-const VERSION = "2.28.0";
+const VERSION = "2.29.0";
 
 // ---------- colors ----------
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -576,7 +576,7 @@ async function mainMenu() {
     ["i", "My public IP", async () => { h1("Public IP"); console.log("  " + await myIp()); }],
     ["g", "GitHub (clone / push)", menuGit],
     ["c", "Cheat sheets", menuCheats],
-    ["a", "AI coder (local Ollama)", async () => aiCoder("")],
+    ["a", "Nexus — AI coder (local Ollama)", async () => aiCoder("")],
     ["t", "Tools catalog", async () => listTools()],
     ["0", "Exit", null],
   ];
@@ -720,7 +720,7 @@ async function cli(args) {
   else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
-  else if (cmd === "code" || cmd === "ai") await aiCoder(rest.join(" "));
+  else if (cmd === "nexus" || cmd === "code" || cmd === "ai") await aiCoder(rest.join(" "));
   else usage();
 }
 
@@ -763,10 +763,10 @@ async function aiCoder(initialPrompt) {
   const ms = await ollamaTags();
   if (!ms.length) { banner(); console.log("  " + red("No local model found. Install Ollama (https://ollama.com), then e.g. `ollama pull qwen2.5-coder` or `ollama pull hermes3`.")); return; }
   const model = process.env.SENTINEL_MODEL || pickCoderModel(ms);
-  banner(); h1("AI coder");
+  banner(); h1("Nexus — AI coder");
   console.log("  " + gray("model ") + mag(model) + gray("   workdir ") + cyan(cwd));
   console.log("  " + gray("Reads/writes files and runs commands right here. Type a task; 'exit' to quit.\n"));
-  const SYS = "You are Sentinel Coder, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
+  const SYS = "You are Nexus, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
   const messages = [{ role: "system", content: SYS }];
   let task = (initialPrompt || "").trim();
   while (true) {
@@ -804,7 +804,7 @@ function usage() {
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
-    code [task]                       AI coding agent (local Ollama): edits files & runs commands
+    nexus [task]                      Nexus — AI coding agent (local Ollama): edits files & runs commands
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
