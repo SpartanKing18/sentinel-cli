@@ -80,6 +80,19 @@ function banner() {
 }
 const rl = () => readline.createInterface({ input: process.stdin, output: process.stdout });
 function ask(q) { return new Promise((res) => { const r = rl(); r.question(cyan("  " + q + " "), (a) => { r.close(); res(a.trim()); }); }); }
+// Claude-Code-style bordered chat input box.
+function chatInput() {
+  return new Promise((res) => {
+    const W = 58;
+    process.stdout.write(cyan("  ╭─ ") + gray("you") + cyan(" " + "─".repeat(W - 6) + "╮") + "\n");
+    const r = rl();
+    r.question(cyan("  │ ") + mag("› "), (a) => {
+      r.close();
+      process.stdout.write(cyan("  ╰" + "─".repeat(W) + "╯") + "\n\n");
+      res(a.trim());
+    });
+  });
+}
 function h1(t) { console.log("\n  " + bold(cyan("▌ " + t)) + "\n"); }
 function ok(s) { return green("✓ ") + s; }
 function copyHint(cmd) { console.log("  " + cmd); }
@@ -836,7 +849,7 @@ async function aiCoder(argv) {
   while (true) {
     if (!task) {
       if (printMode) return;
-      const t = (await ask("›")).trim();
+      const t = (await chatInput()).trim();
       if (!t) { task = ""; continue; }
       if (/^\/?(exit|quit|q)$/i.test(t)) { console.log("\n  " + gray("stay sharp.") + "\n"); return; }
       if (t === "/help") { nexusHelp(); continue; }
@@ -851,8 +864,8 @@ async function aiCoder(argv) {
     // @path attaches a file's contents to the prompt (e.g. "fix the bug in @src/app.js")
     const userMsg = task.replace(/(^|\s)@(\S+)/g, (m, pre, p) => { try { const c = fs.readFileSync(path.resolve(cwd, p), "utf8"); return pre + "\n\n--- " + p + " ---\n" + c.slice(0, 12000) + "\n--- end " + p + " ---\n"; } catch (_) { return m; } });
     messages.push({ role: "user", content: userMsg }); task = "";
+    console.log(cyan("  ▎ ") + bold("nexus") + gray("  " + engine) + "\n");
     if (engine !== "ollama") {
-      console.log("  " + gray("nexus (" + engine + ") working…\n"));
       await runEngineTask(engine, userMsg, cwd, autoApprove, delegated);
       delegated = true; console.log("");
       if (printMode) return;
