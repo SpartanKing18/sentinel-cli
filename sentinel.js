@@ -720,7 +720,12 @@ async function cli(args) {
   else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
-  else if (cmd === "nexus" || cmd === "code" || cmd === "ai") await aiCoder(rest);
+  else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {
+    const sub = (rest[0] || "").toLowerCase();
+    if (sub === "run" || sub === "supervise" || sub === "loop") await nexusRun(rest.slice(1));
+    else if (sub === "overnight") await nexusRun(["--overnight"].concat(rest.slice(1)));
+    else await aiCoder(rest);
+  }
   else usage();
 }
 
@@ -870,13 +875,156 @@ async function aiCoder(argv) {
   }
 }
 
+// ==================== Nexus autonomous orchestrator (multi-level planning, overnight) ====================
+const _cp = require("child_process");
+function hasBin(b) { try { const r = _cp.spawnSync(b, ["--version"], { timeout: 6000 }); return !r.error; } catch (_) { return false; } }
+
+// Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
+function runEngineTask(engine, prompt, cwd, autonomous) {
+  return new Promise((resolve) => {
+    let cmd, args;
+    if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (autonomous) args.push("--dangerously-skip-permissions"); }
+    else if (engine === "opencode") { cmd = "opencode"; args = ["run", prompt]; }
+    else return resolve({ ok: false, output: "unknown engine: " + engine });
+    let out = "";
+    const p = _cp.spawn(cmd, args, { cwd, env: process.env });
+    p.stdout.on("data", (d) => { const s = d.toString(); out += s; process.stdout.write(gray("    " + s.replace(/\n/g, "\n    "))); });
+    p.stderr.on("data", (d) => (out += d.toString()));
+    const to = setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} }, 40 * 60 * 1000);
+    p.on("close", (code) => { clearTimeout(to); resolve({ ok: code === 0, output: out.slice(-12000) }); });
+    p.on("error", (e) => { clearTimeout(to); resolve({ ok: false, output: "engine spawn error: " + e.message + " (is '" + engine + "' installed & logged in?)" }); });
+  });
+}
+function extractJson(text, fallback) {
+  const s = String(text || ""); const arr = s.match(/\[[\s\S]*\]/), obj = s.match(/\{[\s\S]*\}/);
+  for (const m of [arr, obj]) if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
+  return fallback;
+}
+async function planGoal(engine, model, goal, memory) {
+  const prompt = "You are a senior engineer planning autonomous work. Break the GOAL into an ordered list of concrete, independently-verifiable tasks (about 5-15). Return ONLY a JSON array of short task strings — no prose, no markdown.\n\nGOAL: " + goal + (memory ? "\n\nPROJECT MEMORY:\n" + memory : "");
+  let text;
+  if (engine === "ollama") text = await ollamaChat(model, [{ role: "user", content: prompt }], { type: "array", items: { type: "string" } });
+  else text = (await runEngineTask(engine, prompt, process.cwd(), false)).output;
+  let tasks = extractJson(text, null);
+  if (!Array.isArray(tasks) || !tasks.length) tasks = [goal];
+  return tasks.slice(0, 40).map((t, i) => ({ id: i + 1, title: String(t).slice(0, 300), done: false, failed: false, tries: 0 }));
+}
+async function verifyTask(engine, model, goal, task, res) {
+  if (engine !== "ollama") { const bad = /\b(error|failed|cannot|not found|permission denied|traceback)\b/i.test((res.output || "").slice(-600)); return { done: res.ok && !bad, reason: res.ok ? (bad ? "output mentions errors" : "completed") : "agent exited non-zero" }; }
+  const prompt = "Given the GOAL, a TASK, and the AGENT OUTPUT, decide if the task is genuinely complete. Return ONLY JSON {\"done\":true|false,\"reason\":\"...\"}.\nGOAL: " + goal + "\nTASK: " + task + "\nOUTPUT (truncated):\n" + String(res.output || "").slice(-2500);
+  const v = extractJson(await ollamaChat(model, [{ role: "user", content: prompt }], { type: "object", properties: { done: { type: "boolean" }, reason: { type: "string" } }, required: ["done"] }), null);
+  return (v && typeof v.done === "boolean") ? { done: v.done, reason: v.reason || "" } : { done: true, reason: "unverifiable" };
+}
+// Compact single-task tool loop for the local Ollama engine.
+async function ollamaExec(model, task, ctx, cwd) {
+  const fs = require("fs"), path = require("path");
+  const messages = [{ role: "system", content: "You are Nexus, an autonomous coding agent. Complete ONLY the given TASK in the working directory using tools, ONE action per step, then action:'final'. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace}, list_dir{path?}, run_command{command}. Reply with ONE JSON object per the schema.\n" + ctx }, { role: "user", content: "TASK: " + task }];
+  let didTool = false, log = "";
+  for (let step = 1; step <= 30; step++) {
+    let raw; try { raw = await ollamaChat(model, messages, CODER_SCHEMA); } catch (e) { return { ok: false, output: "model error: " + e.message }; }
+    let o; try { o = JSON.parse(raw); } catch (_) { messages.push({ role: "tool", content: "Reply with valid schema JSON." }); continue; }
+    messages.push({ role: "assistant", content: raw });
+    if (o.thought) console.log("    " + gray(o.thought));
+    if (o.action === "final") { if (!didTool && step < 3) { messages.push({ role: "tool", content: "Do the real work first." }); continue; } return { ok: true, output: log + "\n" + (o.final || "") }; }
+    const name = o.tool, a = o.args || {}; let result;
+    try {
+      if (name === "read_file") result = { content: fs.readFileSync(path.resolve(cwd, a.path), "utf8").slice(0, 14000) };
+      else if (name === "list_dir") result = { items: fs.readdirSync(path.resolve(cwd, a.path || "."), { withFileTypes: true }).map((e) => e.isDirectory() ? e.name + "/" : e.name).slice(0, 200) };
+      else if (name === "write_file") { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; log += "\nwrote " + a.path; console.log("    " + green("write ") + a.path); }
+      else if (name === "edit_file") { const fp = path.resolve(cwd, a.path); const t = fs.readFileSync(fp, "utf8"); if (!t.includes(a.find)) result = { error: "find not present" }; else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; log += "\nedited " + a.path; console.log("    " + green("edit ") + a.path); } }
+      else if (name === "run_command") { console.log("    " + mag("$ ") + a.command); const r = await coderShell(a.command, cwd); result = { code: r.code, output: r.output }; log += "\n$ " + a.command + "\n" + r.output.slice(0, 1200); }
+      else result = { error: "unknown tool " + name };
+    } catch (e) { result = { error: e.message }; }
+    if (["read_file", "write_file", "edit_file", "list_dir", "run_command"].includes(name)) didTool = true;
+    messages.push({ role: "tool", content: JSON.stringify(result).slice(0, 14000) });
+  }
+  return { ok: true, output: log + "\n(step limit)" };
+}
+function parseUntil(s) {
+  const now = new Date(); let m;
+  if ((m = /^(\d{1,2}):(\d{2})$/.exec(s))) { const d = new Date(now); d.setHours(+m[1], +m[2], 0, 0); if (d <= now) d.setDate(d.getDate() + 1); return d.getTime(); }
+  if ((m = /^(\d+)h$/.exec(s))) return now.getTime() + (+m[1]) * 3600000;
+  if ((m = /^(\d+)m$/.exec(s))) return now.getTime() + (+m[1]) * 60000;
+  return 0;
+}
+function nexusRunHelp() {
+  banner(); console.log("  " + bold("Nexus run") + " — autonomous, multi-level goal execution\n");
+  console.log("  " + bold("USAGE") + "\n    sentinel nexus run \"<goal>\" [options]\n    sentinel nexus overnight \"<goal>\"   (alias for run --overnight)\n");
+  console.log("  " + bold("OPTIONS"));
+  console.log("    -e, --engine <name>   claude (default if installed) | ollama | opencode");
+  console.log("    -n, --overnight       keep working the plan with retries until done or --until");
+  console.log("        --until <t>       stop at HH:MM, or after 6h / 90m");
+  console.log("        --resume          continue the last run in this folder (.nexus/run.json)");
+  console.log("    -m, --model <name>    ollama model (ollama engine only)");
+  console.log("\n  " + gray("Plan, progress and report live in ./.nexus/ (run.json, report.md, memory.md).") + "\n  " + gray("claude/opencode run with full autonomy (--dangerously-skip-permissions) — use in a trusted repo.") + "\n");
+}
+async function nexusRun(argv) {
+  const fs = require("fs"), path = require("path");
+  const arr = Array.isArray(argv) ? argv.slice() : String(argv || "").split(/\s+/).filter(Boolean);
+  let enginePref = "", overnight = false, resume = false, until = "", modelOverride = "", goalParts = [];
+  for (let i = 0; i < arr.length; i++) { const a = arr[i];
+    if (a === "--engine" || a === "-e") enginePref = arr[++i] || "";
+    else if (a === "--overnight" || a === "-n") overnight = true;
+    else if (a === "--resume") resume = true;
+    else if (a === "--until") until = arr[++i] || "";
+    else if (a === "-m" || a === "--model") modelOverride = arr[++i] || "";
+    else if (a === "-h" || a === "--help") return nexusRunHelp();
+    else goalParts.push(a);
+  }
+  const cwd = process.cwd(), NEXUS = path.join(cwd, ".nexus"); fs.mkdirSync(NEXUS, { recursive: true });
+  const stateFile = path.join(NEXUS, "run.json"), reportFile = path.join(NEXUS, "report.md"), memFile = path.join(NEXUS, "memory.md");
+  const memory = (() => { try { return fs.readFileSync(memFile, "utf8"); } catch (_) { return ""; } })();
+  const avail = { claude: hasBin("claude"), opencode: hasBin("opencode"), ollama: true };
+  let engine = enginePref || (avail.claude ? "claude" : "ollama");
+  if (!avail[engine]) { console.log("  " + red("engine '" + engine + "' unavailable; using ollama")); engine = "ollama"; }
+  let model = null;
+  if (engine === "ollama") { const ms = await ollamaTags(); if (!ms.length) { console.log("  " + red("no local model; install Ollama or use --engine claude")); return; } model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms); }
+  let state;
+  if (resume && fs.existsSync(stateFile)) { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); banner(); h1("Nexus — resuming run"); }
+  else {
+    const goal = goalParts.join(" ").trim();
+    if (!goal) { console.log("  " + red("provide a goal:  sentinel nexus run \"build X\"")); return; }
+    banner(); h1("Nexus — planning");
+    console.log("  " + gray("engine ") + mag(engine) + (model ? gray("  model " + model) : "") + gray("  workdir " + cwd));
+    console.log("  " + gray("decomposing the goal...\n"));
+    const tasks = await planGoal(engine, model, goal, memory);
+    state = { goal, engine, model, tasks, started: Date.now() };
+    console.log("  " + bold("Plan (" + tasks.length + " tasks):"));
+    tasks.forEach((t) => console.log("    " + gray(t.id + ". ") + t.title));
+    console.log("");
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  }
+  const save = () => { try { fs.writeFileSync(stateFile, JSON.stringify(state, null, 2)); } catch (_) {} };
+  const deadline = until ? parseUntil(until) : 0, maxTries = overnight ? 3 : 1;
+  while (true) {
+    const t = state.tasks.find((x) => !x.done && !x.failed);
+    if (!t) break;
+    if (deadline && Date.now() > deadline) { console.log("  " + gray("time limit reached; pausing. Resume with:  sentinel nexus run --resume")); break; }
+    const doneN = state.tasks.filter((x) => x.done).length;
+    console.log("  " + cyan("[" + (doneN + 1) + "/" + state.tasks.length + "] ") + bold(t.title)); t.tries++;
+    const ctx = "GOAL: " + state.goal + "\nDone so far: " + (state.tasks.filter((x) => x.done).map((x) => x.title).join("; ") || "(none)") + (memory ? "\nPROJECT MEMORY:\n" + memory : "");
+    let res;
+    if (engine === "ollama") res = await ollamaExec(model, t.title, ctx, cwd);
+    else res = await runEngineTask(engine, "Work in the current project directory. " + ctx + "\n\nComplete ONLY this task, then briefly report what you did:\nTASK: " + t.title, cwd, true);
+    const verdict = await verifyTask(engine, model, state.goal, t.title, res);
+    if (verdict.done) { t.done = true; console.log("  " + green("done ") + gray(t.title)); }
+    else if (t.tries >= maxTries) { t.failed = true; console.log("  " + red("gave up ") + gray(t.title + " — " + verdict.reason)); }
+    else console.log("  " + gray("not verified (" + verdict.reason + "); retrying"));
+    save();
+  }
+  const okN = state.tasks.filter((t) => t.done).length, failN = state.tasks.filter((t) => t.failed).length;
+  try { fs.writeFileSync(reportFile, "# Nexus run report\n\n- Goal: " + state.goal + "\n- Engine: " + engine + "\n- Completed: " + okN + "/" + state.tasks.length + (failN ? " (" + failN + " failed)" : "") + "\n\n## Tasks\n" + state.tasks.map((t) => "- [" + (t.done ? "x" : " ") + "] " + t.title + (t.failed ? "  (failed)" : "")).join("\n") + "\n"); } catch (_) {}
+  console.log("\n  " + green("run complete: ") + okN + "/" + state.tasks.length + " tasks done" + (failN ? gray(", " + failN + " failed") : "") + gray(".  Report: .nexus/report.md") + "\n");
+}
+
 function usage() {
   banner();
   console.log(`  ${bold("USAGE")}
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
-    nexus [opts] [task]               Nexus AI coder (local Ollama): -y skip prompts, --print headless, -m <model>, --help
+    nexus [opts] [task]               Nexus AI coder (interactive/one-shot): -y skip prompts, --print headless, -m <model>
+    nexus run "<goal>" [opts]         autonomous multi-level runner: -e claude|ollama|opencode, --overnight, --until, --resume
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
