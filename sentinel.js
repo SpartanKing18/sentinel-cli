@@ -933,6 +933,7 @@ function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk) {
     else return resolve({ ok: false, output: "unknown engine: " + engine });
     let out = "";
     const p = _cp.spawn(cmd, args, { cwd, env: process.env });
+    try { p.stdin.end(); } catch (_) {} // signal EOF so the CLI doesn't wait on stdin
     p.stdout.on("data", (d) => { const s = d.toString(); out += s; if (onChunk) onChunk(s); else process.stdout.write(gray("    " + s.replace(/\n/g, "\n    "))); });
     p.stderr.on("data", (d) => (out += d.toString()));
     const to = setTimeout(() => { try { p.kill("SIGKILL"); } catch (_) {} }, 40 * 60 * 1000);
@@ -947,6 +948,7 @@ function runClaudeStream(prompt, cwd, cont, h, ctl) {
     const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
     if (cont) args.push("--continue");
     const cp = _cp.spawn("claude", args, { cwd, env: process.env });
+    try { cp.stdin.end(); } catch (_) {} // signal EOF so claude doesn't wait on stdin
     let buf = "", finalText = "", res = null, killed = false;
     if (ctl) ctl.kill = () => { killed = true; try { cp.kill("SIGINT"); } catch (_) {} setTimeout(() => { try { cp.kill("SIGKILL"); } catch (_) {} }, 1500); };
     cp.stdout.on("data", (d) => {
@@ -1069,6 +1071,17 @@ function scanSecrets(text) {
   ];
   const hits = []; for (const [re, name] of pats) if (re.test(s)) hits.push(name);
   return [...new Set(hits)];
+}
+// Mask secrets before text is sent to a cloud engine (privacy layer).
+function maskSecrets(text) {
+  return String(text)
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/g, "[redacted:private-key]")
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[redacted:aws-key]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{30,}\b/g, "[redacted:github-token]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[redacted:slack-token]")
+    .replace(/\bsk-[A-Za-z0-9]{20,}\b/g, "[redacted:api-key]")
+    .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, "[redacted:google-key]")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, "[redacted:jwt]");
 }
 function extractJson(text, fallback) {
   const s = String(text || ""); const arr = s.match(/\[[\s\S]*\]/), obj = s.match(/\{[\s\S]*\}/);
@@ -1275,8 +1288,8 @@ function nexusTui(engine, cwd, nexusMd) {
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
     const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
-    let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false; // interruption, budget, rate-limit, bracketed paste, completion bell
-    const checkpoints = [], redoStack = [];                          // { tree, label, ts }
+    let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false, redact = false; // interruption, budget, rate-limit, paste, bell, cloud redaction
+    const checkpoints = [], redoStack = [], pinned = new Set();       // { tree, label, ts }; pinned = sticky context files
     const fs = require("fs"), path = require("path");
     // @path inlines a file's contents into the prompt sent to the engine (display keeps the @mention)
     const inlineAts = (t) => t.replace(/(^|\s)@(\S+)/g, (m, pre, f) => { try { const c = fs.readFileSync(path.resolve(cwd, f), "utf8"); return pre + "\n\n--- " + f + " ---\n" + c.slice(0, 12000) + "\n--- end " + f + " ---\n"; } catch (_) { return m; } });
@@ -1311,6 +1324,8 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/agents", "run tasks in parallel: /agents a ;; b ;; c"], ["/mcp", "list / connect MCP servers"], ["/hooks", "show configured tool hooks"],
       ["/race", "run a prompt on every engine at once"], ["/review", "second opinion from a different engine"], ["/redo", "reapply an undone change"],
       ["/secrets", "scan the repo for leaked credentials"], ["/scan", "quick TCP port scan of a host"], ["/notify", "bell + desktop alert on long turns"],
+      ["/watch", "run a cmd; auto-fix & re-run until it passes"], ["/commit", "AI commit message + commit the diff"], ["/diff", "colored session diff vs HEAD"],
+      ["/pin", "keep a file in context every turn"], ["/pins", "list pinned files"], ["/unpin", "remove a pinned file"], ["/redact", "mask secrets before cloud sends"],
       ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
     // Custom project slash commands (Claude-Code / Glitch style): each .md file in
@@ -1356,6 +1371,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const L = [];
       for (const m of transcript) {
         if (m.role === "art") { L.push(""); ART.forEach((ln, i) => L.push(gline(ln, i))); L.push(""); continue; }
+        if (m.role === "diff") { for (const ln of String(m.text).replace(/\r/g, "").split("\n")) { const c = /^\+\+\+|^---/.test(ln) ? bold : /^\+/.test(ln) ? green : /^-/.test(ln) ? red : /^@@/.test(ln) ? cyan : gray; L.push(c(clip(ln, cols() - 3))); } L.push(""); continue; }
         if (m.role === "system") { for (const ln of wrap(m.text)) L.push(gray(ln)); L.push(""); continue; }
         if (m.role === "user") { const w = wrap(m.text); L.push(mag("› ") + (w[0] || "")); for (let i = 1; i < w.length; i++) L.push("  " + w[i]); L.push(""); continue; }
         // nexus turn: ordered items (text + tool cards)
@@ -1404,6 +1420,8 @@ function nexusTui(engine, cwd, nexusMd) {
       if (activeAgents) parts.push(mag(activeAgents + " agent" + (activeAgents > 1 ? "s" : "")));
       if (rate && rate.status && rate.status !== "allowed") parts.push(red("rate-limited"));
       else if (rate && rate.isUsingOverage) parts.push(yellow("overage"));
+      if (pinned.size) parts.push(cyan(pinned.size + " pinned"));
+      if (redact) parts.push(yellow("redact"));
       parts.push(MODES[mode].c(MODES[mode].k));
       return "  " + clip(parts.join(gray("  ·  ")), cols() - 3);
     };
@@ -1470,7 +1488,9 @@ function nexusTui(engine, cwd, nexusMd) {
       if (hooks) { const hr = runHooks(hooks, "UserPromptSubmit", { NEXUS_ENGINE: engine, NEXUS_PROMPT: text }, cwd); if (hr.block) { transcript.push({ role: "user", text }); transcript.push({ role: "system", text: "blocked by UserPromptSubmit hook" + (hr.out ? ": " + hr.out : "") }); render(); return; } }
       history.push(text); hIdx = history.length; scroll = 0;
       transcript.push({ role: "user", text });
-      const sendText = inlineAts(text);
+      let sendText = inlineAts(text);
+      if (pinned.size) { let pre = ""; for (const f of pinned) { try { pre += "\n\n--- pinned: " + f + " ---\n" + fs.readFileSync(path.resolve(cwd, f), "utf8").slice(0, 8000) + "\n--- end " + f + " ---"; } catch (_) {} } if (pre) sendText = pre + "\n\n" + sendText; }
+      if (redact && PAID[engine]) { const masked = maskSecrets(sendText); if (masked !== sendText) { const n = (masked.match(/\[redacted:/g) || []).length; transcript.push({ role: "system", text: "redacted " + n + " secret(s) before sending to " + engine + " (privacy mode on)" }); sendText = masked; } }
       const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + sendText : sendText;
       const block = { role: "nexus", items: [] }; transcript.push(block);
       const stat = { files: new Set(), cmds: 0, inTok0: sess.inTok, outTok0: sess.outTok, cost0: sess.cost, t0: Date.now() };
@@ -1651,6 +1671,51 @@ function nexusTui(engine, cwd, nexusMd) {
         card.status = "ok"; card.end = Date.now(); ensureText().full = "second opinion (" + re + "):\n\n" + (out || "(no output)").trim(); busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
       })();
     };
+    // /watch <cmd> — run a command; if it fails, have the engine fix the code and re-run, up to 5 tries
+    const watchFix = (command) => {
+      transcript.push({ role: "user", text: "/watch  " + command });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Watching"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      const ck = nexusCheckpoint(cwd); if (ck) checkpoints.push({ tree: ck, label: "watch " + command, ts: Date.now() });
+      startTick(); render();
+      (async () => {
+        let passed = false, attempts = 0;
+        for (let att = 1; att <= 5 && !(ctl && ctl.stopped); att++) {
+          attempts = att;
+          const rc = { type: "tool", id: "wr" + att, name: "Bash", label: "Bash(" + oneline(command, 40) + ")", status: "run", start: Date.now() }; block.items.push(rc); render();
+          const r = await coderShell(command, cwd); rc.status = r.code === 0 ? "ok" : "err"; rc.end = Date.now(); rc.detail = oneline(r.output, 260); render();
+          if (r.code === 0) { const t = ensureText(); t.full += (t.full ? "\n" : "") + "command passed on attempt " + att + "."; passed = true; break; }
+          if (att === 5) break;
+          const t = ensureText(); t.full += (t.full ? "\n" : "") + "attempt " + att + " failed — asking " + engine + " to fix…"; render();
+          const fc = { type: "tool", id: "wf" + att, name: "Task", label: "Task(fix attempt " + att + ")", status: "run", start: Date.now() }; block.items.push(fc); activeAgents = 1; render();
+          const fixPrompt = "The command `" + command + "` is failing. Its output was:\n\n" + (r.output || "").slice(-3000) + "\n\nEdit the code so the command passes. Make the file edits now — do not ask questions.";
+          try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); await ollamaExec(mdl, fixPrompt, "", cwd); } else { await runEngineTask(engine, fixPrompt, cwd, true); } } catch (_) {}
+          fc.status = "ok"; fc.end = Date.now(); activeAgents = 0; render();
+        }
+        for (const it of block.items) if (it.status === "run") { it.status = "ok"; it.end = Date.now(); }
+        const t = ensureText(); t.full += (passed ? "\n\nAll green." : "\n\nStill failing after " + attempts + " attempt(s) — review the output above.");
+        busy = false; ctl = null; block.summary = "watch  ·  " + attempts + " attempt(s)  ·  " + ((Date.now() - t0) / 1000).toFixed(1) + "s" + (ck ? "  ·  undo #" + checkpoints.length : "");
+        try { saveSession(); } catch (_) {} maybeAutoCompact(); render();
+      })();
+    };
+    // /commit — write an AI commit message for the working diff and commit
+    const commitChanges = () => {
+      let diff = ""; try { _cp.execSync("git add -A", { cwd, stdio: "ignore" }); diff = _cp.execSync("git diff --cached", { cwd, encoding: "utf8" }); } catch (_) { transcript.push({ role: "system", text: "/commit needs a git repo" }); render(); return; }
+      if (!diff.trim()) { transcript.push({ role: "system", text: "nothing to commit" }); render(); return; }
+      transcript.push({ role: "user", text: "/commit" });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Composing"; ctl = { stopped: false, kill() { this.stopped = true; } };
+      const card = { type: "tool", id: "cm", name: "Task", label: "Task(commit message)", status: "run", start: Date.now() }; block.items.push(card); startTick(); render();
+      (async () => {
+        const prompt = "Write a Conventional-Commits message for this diff: a single subject line under 72 chars (type: summary), optionally a short body. Output ONLY the message, no backticks, no preamble.\n\n" + diff.slice(0, 6000);
+        let msg = ""; try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); msg = await ollamaChat(mdl, [{ role: "user", content: prompt }]); } else { msg = (await runEngineTask(engine, prompt, cwd, false)).output; } } catch (_) {}
+        msg = (msg || "").replace(/```[a-z]*\n?|```/g, "").trim().split("\n").slice(0, 8).join("\n").trim() || "chore: update";
+        card.status = "ok"; card.end = Date.now();
+        let done = false; try { const subj = msg.split("\n")[0], body = msg.split("\n").slice(1).join("\n").trim(); _cp.execSync("git commit -m " + JSON.stringify(subj) + (body ? " -m " + JSON.stringify(body) : ""), { cwd, stdio: "ignore" }); done = true; } catch (_) {}
+        ensureText().full = (done ? "committed:\n\n" : "generated message (commit failed — commit manually):\n\n") + msg;
+        busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
+      })();
+    };
     // ---- slash commands ----
     const saveSession = () => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "session.json"), JSON.stringify({ engine, model: sess.model, transcript, sess, ts: Date.now() })); } catch (_) {} };
     const handleSlash = (t) => {
@@ -1659,7 +1724,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race <prompt> (all engines at once) · /review [engine] (second opinion) · /secrets (credential scan) · /scan <host> (port scan) · /agents a ;; b (parallel) · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race (all engines) · /review [engine] · /watch <cmd> (auto-fix loop) · /commit · /diff · /pin <file> · /secrets · /scan <host> · /agents a ;; b · /redact · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -1686,6 +1751,13 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/secrets") { try { const files = _cp.execSync("git ls-files", { cwd, encoding: "utf8" }).split("\n").filter(Boolean).slice(0, 3000); const found = []; for (const f of files) { try { if (fs.statSync(path.join(cwd, f)).size > 400000) continue; const hits = scanSecrets(fs.readFileSync(path.join(cwd, f), "utf8")); if (hits.length) found.push("  " + f + " — " + hits.join(", ")); } catch (_) {} } transcript.push({ role: "system", text: found.length ? ("possible secrets found in tracked files:\n" + found.slice(0, 40).join("\n")) : "scanned tracked files — no obvious secrets found" }); } catch (_) { transcript.push({ role: "system", text: "/secrets needs a git repo (uses git ls-files)" }); } }
       else if (cmd === "/scan") { const host = arg || "127.0.0.1"; const COMMON = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 3389, 5432, 6379, 8080, 8443, 9000]; transcript.push({ role: "system", text: "scanning " + host + " (" + COMMON.length + " common TCP ports)…" }); render(); quickScan(host, COMMON).then((open) => { transcript.push({ role: "system", text: open.length ? ("open on " + host + ": " + open.join(", ")) : "no common ports open on " + host }); render(); }); }
       else if (cmd === "/notify") { notify = !notify; transcript.push({ role: "system", text: "completion notifications " + (notify ? "ON — a bell rings (and a desktop notification) when a turn over ~15s finishes, so you can step away" : "off") }); }
+      else if (cmd === "/watch") { if (!argstr) transcript.push({ role: "system", text: "usage: /watch <command>  — runs it, and if it fails has " + engine + " fix the code and re-run, up to 5 times (e.g. /watch npm test)" }); else watchFix(argstr); }
+      else if (cmd === "/commit") commitChanges();
+      else if (cmd === "/diff") { let d = ""; try { d = _cp.execSync("git -c color.ui=never diff HEAD", { cwd, encoding: "utf8" }); } catch (_) { try { d = _cp.execSync("git -c color.ui=never diff", { cwd, encoding: "utf8" }); } catch (__) {} } if (!d.trim()) transcript.push({ role: "system", text: "no changes vs HEAD (working tree clean)" }); else transcript.push({ role: "diff", text: d.slice(0, 24000) }); }
+      else if (cmd === "/pin") { if (!arg) transcript.push({ role: "system", text: "usage: /pin <file>  — keeps that file in context on every turn" }); else if (!fs.existsSync(path.resolve(cwd, arg))) transcript.push({ role: "system", text: "no such file: " + arg }); else { pinned.add(arg); transcript.push({ role: "system", text: "pinned " + arg + " — its contents are added to every prompt now (" + pinned.size + " pinned)" }); } }
+      else if (cmd === "/unpin") { if (arg && pinned.delete(arg)) transcript.push({ role: "system", text: "unpinned " + arg }); else if (arg === "all") { pinned.clear(); transcript.push({ role: "system", text: "unpinned all" }); } else transcript.push({ role: "system", text: "not pinned: " + arg + "  (/unpin all clears everything)" }); }
+      else if (cmd === "/pins") transcript.push({ role: "system", text: pinned.size ? ("pinned files (in context every turn):\n" + [...pinned].map((f) => "  " + f).join("\n")) : "no pinned files — /pin <file> to add one" });
+      else if (cmd === "/redact") { redact = !redact; transcript.push({ role: "system", text: "cloud redaction " + (redact ? "ON — secrets (API keys, tokens, private keys) are masked before anything is sent to a cloud engine (claude/opencode); local engine is unaffected" : "off") }); }
       else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
       else if (cmd === "/init") { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"), cfg = path.join(dir, "config.json"); const made = []; if (!fs.existsSync(md)) { fs.writeFileSync(md, "# Nexus project instructions\n\nNexus loads this file every session.\n\n## Project\n- (describe your project)\n\n## Conventions\n- (style, patterns to follow)\n\n## Build / run / test\n- (commands)\n"); made.push("NEXUS.md"); } if (!fs.existsSync(cfg)) { fs.writeFileSync(cfg, JSON.stringify({ engine, model: "" }, null, 2) + "\n"); made.push("config.json"); } transcript.push({ role: "system", text: made.length ? "initialized .nexus/ (" + made.join(", ") + ") — edit NEXUS.md to give Nexus project context" : ".nexus/ already exists" }); } catch (e) { transcript.push({ role: "system", text: "init failed: " + e.message }); } }
       else if (cmd === "/model") { if (arg) { sess.model = arg; transcript.push({ role: "system", text: "model set to " + arg + (engine !== "ollama" ? " (note: the claude/opencode engines choose their own model)" : "") }); } else transcript.push({ role: "system", text: "current model: " + (sess.model || engine) }); }
