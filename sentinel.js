@@ -771,7 +771,9 @@ function nexusHelp() {
   console.log("  " + bold("IN-SESSION COMMANDS"));
   console.log("    /help          list commands           /model [name]  show or switch model");
   console.log("    /auto          toggle auto-approve      /clear         reset the conversation");
+  console.log("    /undo          revert last file change  /diff          list files changed this session");
   console.log("    /exit          quit\n");
+  console.log("  " + gray("Attach a file to a task with @path  —  e.g.  fix the bug in @src/app.js") + "\n");
   console.log("  " + bold("ENV") + "   SENTINEL_MODEL (default model) · OLLAMA_HOST / OLLAMA_PORT (remote Ollama)\n");
   console.log("  " + gray("Nexus reads & writes files and runs commands in the current folder. Local models only — private.") + "\n");
 }
@@ -800,6 +802,8 @@ async function aiCoder(argv) {
   }
   const SYS = "You are Nexus, a terminal AI coding agent working in " + cwd + " on the operator's own machine. Accomplish the task by taking ONE action per step and reading the OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace} (replace one exact string), list_dir{path?}, run_command{command}. Reply with exactly ONE JSON object per the schema: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Write real, working code; prefer edit_file for small changes. Keep going until the task is fully done, then action:\"final\" with a short summary.";
   const messages = [{ role: "system", content: SYS }];
+  const changed = [];  // session change log for /undo and /diff: {path, before|null, label}
+  const relp = (p) => path.relative(cwd, p) || p;
   // ---- permission gate (Glitch-style): confirm risky actions unless auto-approve ----
   async function approve(label) {
     if (autoApprove) return true;
@@ -818,10 +822,14 @@ async function aiCoder(argv) {
       if (t === "/auto") { autoApprove = !autoApprove; console.log("  " + gray("auto-approve " + (autoApprove ? "ON" : "OFF"))); continue; }
       if (t === "/clear") { messages.length = 1; console.log("  " + gray("conversation cleared")); continue; }
       if (t.startsWith("/model")) { const m = t.split(/\s+/)[1]; if (m) { model = m; console.log("  " + gray("model -> " + m)); } else console.log("  " + gray("model: " + model + gray("  available: " + ms.join(", ")))); continue; }
+      if (t === "/undo") { const c = changed.pop(); if (!c) console.log("  " + gray("nothing to undo")); else try { if (c.before == null) { fs.unlinkSync(c.path); console.log("  " + gray("undid " + c.label + " (deleted new file)")); } else { fs.writeFileSync(c.path, c.before); console.log("  " + gray("undid " + c.label)); } } catch (e) { console.log("  " + red("undo failed: " + e.message)); } continue; }
+      if (t === "/diff" || t === "/changed") { if (!changed.length) console.log("  " + gray("no changes this session")); else { console.log("  " + gray("changed this session:")); changed.forEach((c) => console.log("    " + relp(c.path) + (c.before == null ? gray("  (new)") : ""))); } continue; }
       if (t.startsWith("/")) { console.log("  " + gray("unknown command; try /help")); continue; }
       task = t;
     }
-    messages.push({ role: "user", content: task }); task = "";
+    // @path attaches a file's contents to the prompt (e.g. "fix the bug in @src/app.js")
+    const userMsg = task.replace(/(^|\s)@(\S+)/g, (m, pre, p) => { try { const c = fs.readFileSync(path.resolve(cwd, p), "utf8"); return pre + "\n\n--- " + p + " ---\n" + c.slice(0, 12000) + "\n--- end " + p + " ---\n"; } catch (_) { return m; } });
+    messages.push({ role: "user", content: userMsg }); task = "";
     let didTool = false, nudges = 0;
     for (let step = 1; step <= 40; step++) {
       let raw; try { raw = await ollamaChat(model, messages, CODER_SCHEMA); } catch (e) { console.log("  " + red(e.message)); break; }
@@ -838,7 +846,7 @@ async function aiCoder(argv) {
         else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; if (!printMode) console.log("  " + cyan("ls ") + (a.path || ".")); }
         else if (name === "write_file") {
           if (!(await approve("write " + a.path))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.path); }
-          else { const fp = path.resolve(cwd, a.path); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines)")); }
+          else { const fp = path.resolve(cwd, a.path); let before = null; try { before = fs.readFileSync(fp, "utf8"); } catch (_) {} fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, a.content == null ? "" : a.content); changed.push({ path: fp, before, label: "write " + a.path }); result = { ok: true }; console.log("  " + green("write ") + a.path + gray(" (" + String(a.content || "").split("\n").length + " lines" + (before != null ? ", was " + before.split("\n").length : "") + ")")); }
         }
         else if (name === "edit_file") {
           const fp = path.resolve(cwd, a.path); let t;
@@ -846,7 +854,7 @@ async function aiCoder(argv) {
           if (t == null) { result = { error: "cannot read " + a.path }; }
           else if (!t.includes(a.find)) { result = { error: "find text not present in file" }; }
           else if (!(await approve("edit " + a.path))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.path); }
-          else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); result = { ok: true }; console.log("  " + green("edit ") + a.path); }
+          else { fs.writeFileSync(fp, t.replace(a.find, a.replace == null ? "" : a.replace)); changed.push({ path: fp, before: t, label: "edit " + a.path }); result = { ok: true }; console.log("  " + green("edit ") + a.path); }
         }
         else if (name === "run_command") {
           if (!(await approve("run: " + a.command))) { result = { error: "denied by operator" }; console.log("  " + red("denied ") + a.command); }
