@@ -1055,18 +1055,46 @@ function runHooks(hooks, event, env, cwd) {
 }
 // ---------- Parallel sub-agents: fan a list of independent tasks out across the current engine ----------
 async function runSubagents(engine, tasks, cwd, model, onProgress) {
-  const results = new Array(tasks.length); let idx = 0;
-  const CONC = Math.max(1, Math.min(engine === "ollama" ? 1 : 4, tasks.length)); // ollama runs one model at a time
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++; if (onProgress) onProgress(i, "run");
-      let out;
-      try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", cwd); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], cwd, true); out = (r.output || "").trim(); } }
-      catch (e) { out = "error: " + e.message; }
-      results[i] = out; if (onProgress) onProgress(i, "done");
+  const path = require("path"), fs = require("fs"), os = require("os");
+  const results = new Array(tasks.length);
+  // Isolate each concurrent agent in its own git worktree so parallel writers can't
+  // corrupt each other; merge their changes back sequentially at the end.
+  let baseCommit = null, isGit = false;
+  try { _cp.execSync("git rev-parse --is-inside-work-tree", { cwd, stdio: "ignore" }); isGit = true; } catch (_) {}
+  if (isGit) { try { const tree = nexusCheckpoint(cwd); if (tree) baseCommit = _cp.execSync("git commit-tree " + tree + " -m nexus-agents-base", { cwd, encoding: "utf8" }).trim(); } catch (_) {} }
+  const useWt = !!(isGit && baseCommit);
+  const worktrees = new Array(tasks.length).fill(null);
+  const stamp = Date.now().toString(36);
+  const removeWt = (wt) => { try { _cp.execSync("git worktree remove --force " + JSON.stringify(wt), { cwd, stdio: "ignore" }); } catch (_) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch (__) {} } };
+  const runOne = async (i) => {
+    if (onProgress) onProgress(i, "run");
+    let dir = cwd;
+    if (useWt) { const wt = path.join(os.tmpdir(), "nexus-agent-" + stamp + "-" + i); try { _cp.execSync("git worktree add --detach " + JSON.stringify(wt) + " " + baseCommit, { cwd, stdio: "ignore" }); worktrees[i] = dir = wt; } catch (_) { dir = cwd; } }
+    let out;
+    try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", dir); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], dir, true); out = (r.output || "").trim(); } }
+    catch (e) { out = "error: " + e.message; }
+    results[i] = out; if (onProgress) onProgress(i, "done");
+  };
+  // With isolation, agents run concurrently; without it (no git, or ollama), serialize to avoid corrupting the shared dir.
+  const conc = useWt ? Math.max(1, Math.min(4, tasks.length)) : 1;
+  let idx = 0; async function worker() { while (idx < tasks.length) { await runOne(idx++); } }
+  try { await Promise.all(Array.from({ length: conc }, worker)); }
+  finally {
+    if (useWt) {
+      const claimed = new Map(), conflicts = [];
+      for (let i = 0; i < tasks.length; i++) { const wt = worktrees[i]; if (!wt) continue;
+        try { const status = _cp.execSync("git -C " + JSON.stringify(wt) + " status --porcelain -uall", { encoding: "utf8" });
+          for (const line of status.split("\n")) { if (!line.trim()) continue; const st = line.slice(0, 2); let p = line.slice(3); if (p.includes(" -> ")) p = p.split(" -> ")[1]; p = p.replace(/^"|"$/g, "");
+            if (claimed.has(p)) { conflicts.push(p); continue; }
+            claimed.set(p, i); const src = path.join(wt, p), dst = path.join(cwd, p);
+            try { if (/D/.test(st) && !fs.existsSync(src)) fs.rmSync(dst, { force: true }); else if (fs.existsSync(src)) { fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.copyFileSync(src, dst); } } catch (_) {}
+          }
+        } catch (_) {}
+      }
+      for (const wt of worktrees) if (wt) removeWt(wt);
+      if (conflicts.length) { const u = [...new Set(conflicts)]; const note = "\n\n[merge: " + u.length + " file(s) were edited by more than one agent — kept the first writer, skipped the rest: " + u.slice(0, 8).join(", ") + "]"; const last = results.length - 1; results[last] = (results[last] || "") + note; }
     }
   }
-  await Promise.all(Array.from({ length: CONC }, worker));
   return results;
 }
 // Secret scanner — flags common leaked credentials in text/files (Nexus is a security tool).
@@ -1787,7 +1815,7 @@ function nexusTui(engine, cwd, nexusMd) {
         else if (!loadMcpConfig(cwd)) transcript.push({ role: "system", text: "no MCP servers configured. Create .nexus/mcp.json (or .mcp.json):\n  { \"mcpServers\": { \"name\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-...\"] } } }\nThe claude engine reads .mcp.json natively; the local engine gets these tools too." });
         else if (!mcpServers.length) transcript.push({ role: "system", text: "MCP servers are still connecting… run /mcp again in a moment" });
         else transcript.push({ role: "system", text: "MCP servers:\n" + mcpServers.map((s) => s.error ? ("  " + s.name + "  — error: " + s.error) : ("  " + s.name + "  — " + (s.tools || []).length + " tool(s): " + (s.tools || []).map((t) => t.name).slice(0, 8).join(", "))).join("\n") + "\nthe local engine can call these as mcp__<server>__<tool>" }); }
-      else if (cmd === "/agents" || cmd === "/parallel") { const tasks = argstr.split(/\s*;;\s*/).map((s) => s.trim()).filter(Boolean); if (tasks.length < 2) transcript.push({ role: "system", text: "usage: /agents <task 1> ;; <task 2> ;; …   — runs each independent task in parallel via sub-agents on the " + engine + " engine" }); else spawnAgents(tasks); }
+      else if (cmd === "/agents" || cmd === "/parallel") { const tasks = argstr.split(/\s*;;\s*/).map((s) => s.trim()).filter(Boolean); if (tasks.length < 2) transcript.push({ role: "system", text: "usage: /agents <task 1> ;; <task 2> ;; …   — runs each task in parallel on the " + engine + " engine, each in its own isolated git worktree, then merges the changes back" }); else spawnAgents(tasks); }
       else if (cmd === "/hooks") { transcript.push({ role: "system", text: hooks ? ("hooks (.nexus/hooks.json) active for events: " + Object.keys(hooks).join(", ") + "\n  PreToolUse/PostToolUse run for the local engine; UserPromptSubmit & Stop run for every engine") : "no hooks configured. Create .nexus/hooks.json:\n  { \"PreToolUse\": [ { \"matcher\": \"run_command|write_file\", \"command\": \"echo $TOOL_NAME >> .nexus/audit.log\" } ] }\n  events: UserPromptSubmit · PreToolUse · PostToolUse · Stop  (non-zero exit on PreToolUse/UserPromptSubmit blocks the action)" }); }
       else if (cmd === "/status") transcript.push({ role: "system", text: "status:\n  engine   " + engine + (sess.model && sess.model !== engine ? " (" + sess.model + ")" : "") + "\n  dir      " + cwd + "\n  mode     " + MODES[mode].k + "\n  context  " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "% of " + fmtK(sess.ctxWindow) + "\n  tokens   ↑" + fmtK(sess.inTok) + " ↓" + fmtK(sess.outTok) + (PAID[engine] ? (sess.cost ? " · $" + sess.cost.toFixed(4) : " · billed") : " · local · free") + "\n  budget   " + (costCap ? "$" + costCap.toFixed(2) + " cap" : "none") + "\n  undo     " + checkpoints.length + " checkpoint(s)" });
       else if (cmd === "/doctor") transcript.push({ role: "system", text: "doctor:\n  claude CLI   " + (hasBin("claude") ? "found" : "not found (needed for the claude engine)") + "\n  opencode     " + (hasBin("opencode") ? "found" : "not found") + "\n  git          " + (hasBin("git") ? "found — /undo & checkpoints active" : "not found — /undo disabled") + "\n  node         " + process.version + "\n  ollama is checked live when you switch to it" });
