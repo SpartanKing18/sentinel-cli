@@ -1527,13 +1527,13 @@ function nexusTui(engine, cwd, nexusMd) {
     const bodyLines = () => {
       const L = [];
       for (const m of transcript) {
-        if (m.role === "art") { L.push(""); ART.forEach((ln, i) => L.push(gline(ln, i))); L.push(""); continue; }
+        if (m.role === "art") { const w = stripA(ART[0]).length; const wm = useColor ? "N E X U S".split("").map((ch, k) => "\x1b[1;" + GRAD[k % GRAD.length] + "m" + ch).join("") + "\x1b[0m" : "N E X U S"; L.push(""); L.push(gline("  " + "▁".repeat(Math.max(0, w - 2)), 0)); ART.forEach((ln, i) => L.push(gline(ln, i))); L.push(gline("  " + "▔".repeat(Math.max(0, w - 2)), 4)); L.push("  " + wm + gray("   the multi-engine AI coding agent   ") + mag("v" + VERSION)); L.push(""); continue; }
         if (m.role === "diff") { for (const ln of String(m.text).replace(/\r/g, "").split("\n")) { const c = /^\+\+\+|^---/.test(ln) ? bold : /^\+/.test(ln) ? green : /^-/.test(ln) ? red : /^@@/.test(ln) ? cyan : gray; L.push(c(clip(ln, cols() - 3))); } L.push(""); continue; }
         if (m.role === "plan") { const done = plan.filter((t) => t.done).length; L.push(bold(cyan("plan")) + gray("  " + done + "/" + plan.length + " done  ·  /plan run to execute")); if (!plan.length) L.push("  " + gray("(empty)")); for (let i = 0; i < plan.length; i++) { const t = plan[i]; const box = t.running ? yellow("[~]") : t.done ? green("[x]") : gray("[ ]"); for (const ln of wrap((i + 1) + ". " + t.text)) L.push("  " + box + " " + colorMd(ln, false)); } L.push(""); continue; }
         if (m.role === "system") { for (const ln of wrap(m.text)) L.push(gray(ln)); L.push(""); continue; }
         if (m.role === "user") { const w = wrap(m.text); L.push(mag("› ") + (w[0] || "")); for (let i = 1; i < w.length; i++) L.push("  " + w[i]); L.push(""); continue; }
         // nexus turn: ordered items (text + tool cards)
-        L.push(cyan("● ") + bold("nexus") + gray("  " + engine));
+        L.push(cyan("● ") + (useColor ? "nexus".split("").map((ch, k) => "\x1b[1;" + GRAD[k % GRAD.length] + "m" + ch).join("") + "\x1b[0m" : "nexus") + gray("  " + engine + (cowork.on ? " +" + cowork.weak.replace(/^claude-|-\d.*$/g, "") : "")));
         for (const it of (m.items || [])) {
           if (it.type === "text") {
             const vis = it.full.slice(0, it.shown);
@@ -2131,12 +2131,14 @@ function nexusTui(engine, cwd, nexusMd) {
       const taglines = ["multi-engine · Claude + local + OpenCode", "race cloud vs local — /race", "save tokens — /cowork /lean /effort", "git-native — /undo /diff /commit", "secure by default — /guard /redact", "private local RAG — /index", "50+ commands — just type /"];
       const artW = ART[0].length;
       const gart = (s, i, off) => useColor ? "\x1b[1;" + GRAD[(i + off) % GRAD.length] + "m" + s + "\x1b[0m" : s;
+      const stars = []; for (let k = 0; k < 16; k++) stars.push({ x: 1 + (Math.random() * (cols() - 2) | 0), y: 1 + (Math.random() * (rows() - 2) | 0), ph: (Math.random() * 6) | 0 });
       let f = 0; const total = 22;
       const t = setInterval(() => {
         const C = cols(), R = rows(), cx = (C / 2) | 0, cy = (R / 2) | 0, top = Math.max(1, cy - 6);
         caps[1][1] = localModels > 0;
         const put = (row, str, vis) => ESC + "[" + row + ";" + Math.max(1, cx - (((vis || str.length) / 2) | 0)) + "H" + str;
         let b = ESC + "[2J";
+        for (const s of stars) { const tw = (f + s.ph) % 6; const ch = tw < 2 ? "·" : tw < 4 ? "+" : "*"; b += ESC + "[" + s.y + ";" + s.x + "H" + (tw < 2 ? gray(ch) : tw < 4 ? dim(cyan(ch)) : cyan(ch)); } // twinkling starfield behind the logo
         for (let i = 0; i < ART.length; i++) b += ESC + "[" + (top + i) + ";" + Math.max(1, cx - (artW / 2 | 0)) + "H" + gart(ART[i], i, f); // shimmer wave down the logo
         b += put(top + ART.length + 1, dim(gray("the multi-engine AI coding agent")), 32);
         const nShown = Math.min(caps.length, ((f / total) * caps.length | 0) + 1);
@@ -2147,7 +2149,13 @@ function nexusTui(engine, cwd, nexusMd) {
         const tl = taglines[(f / 3 | 0) % taglines.length];
         b += put(top + ART.length + 7, cyan(tl), tl.length);
         out.write(b);
-        if (++f > total) { clearInterval(t); loading = false; out.write(ESC + "[2J"); render(); }
+        if (++f > total) { clearInterval(t);
+          // power-on flash: one bright frame of the logo, then hand off to the chat
+          const cx2 = (cols() / 2) | 0, cy2 = (rows() / 2) | 0, top2 = Math.max(1, cy2 - 6);
+          let fl = ESC + "[2J"; for (let i = 0; i < ART.length; i++) fl += ESC + "[" + (top2 + i) + ";" + Math.max(1, cx2 - (artW / 2 | 0)) + "H" + (useColor ? "\x1b[1;97m" + ART[i] + "\x1b[0m" : ART[i]);
+          out.write(fl);
+          setTimeout(() => { loading = false; out.write(ESC + "[2J"); render(); }, 110);
+        }
       }, 55);
     })();
   });
