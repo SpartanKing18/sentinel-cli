@@ -1409,7 +1409,8 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/secrets", "scan the repo for leaked credentials"], ["/scan", "quick TCP port scan of a host"], ["/notify", "bell + desktop alert on long turns"],
       ["/watch", "run a cmd; auto-fix & re-run until it passes"], ["/commit", "AI commit message + commit the diff"], ["/diff", "colored session diff vs HEAD"],
       ["/pin", "keep a file in context every turn"], ["/pins", "list pinned files"], ["/unpin", "remove a pinned file"], ["/redact", "mask secrets before cloud sends"],
-      ["/ensemble", "all engines answer, then synthesize the best"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
+      ["/ensemble", "all engines answer, then synthesize the best"], ["/bench", "speed / tokens / cost table per engine"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
+      ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"], ["/offline", "local-only privacy lock"],
       ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
@@ -1425,6 +1426,18 @@ function nexusTui(engine, cwd, nexusMd) {
     const hooks = loadHooks(cwd);
     let mcpServers = []; // connected { name, call, tools } (or { name, error })
     const mcpToolList = () => mcpServers.filter((s) => !s.error).flatMap((s) => (s.tools || []).map((t) => ({ full: "mcp__" + s.name + "__" + t.name, srv: s, name: t.name, desc: t.description || "" })));
+    // saved prompt macros (.nexus/snippets.json) + a lightweight local codebase index (.nexus/index.json)
+    let snippets = {}; try { snippets = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "snippets.json"), "utf8")) || {}; } catch (_) {}
+    const saveSnippets = () => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "snippets.json"), JSON.stringify(snippets, null, 2)); } catch (_) {} };
+    let index = null; try { const raw = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "index.json"), "utf8")); if (raw && raw.files) index = raw; } catch (_) {}
+    const buildIndex = () => {
+      const files = {}; const SKIP = /(^|\/)(\.git|node_modules|\.nexus|dist|build|\.cache|\.next|target|__pycache__)(\/|$)/;
+      const CODE = /\.(js|jsx|ts|tsx|py|rb|go|rs|java|c|h|cpp|cc|cs|php|swift|kt|sh|css|scss|html|json|md|yml|yaml|toml)$/i;
+      const walk = (d) => { let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { return; } for (const e of ents) { const fp = path.join(d, e.name); if (SKIP.test(fp)) continue; if (e.isDirectory()) walk(fp); else if (CODE.test(e.name)) { try { if (fs.statSync(fp).size > 400000) continue; const txt = fs.readFileSync(fp, "utf8"); const kw = {}; for (const w of txt.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || []) kw[w] = (kw[w] || 0) + 1; files[path.relative(cwd, fp)] = Object.keys(kw); } catch (_) {} } if (Object.keys(files).length > 4000) return; } };
+      walk(cwd); index = { files, ts: Date.now() }; try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "index.json"), JSON.stringify(index)); } catch (_) {} return Object.keys(files).length;
+    };
+    // score indexed files by keyword overlap with the prompt; return the top matches (excluding pinned/@-mentioned)
+    const retrieve = (text, k) => { if (!index || !index.files) return []; const q = new Set((text.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || []).filter((w) => w.length > 3)); if (!q.size) return []; const scored = []; for (const f of Object.keys(index.files)) { if (pinned.has(f) || text.includes("@" + f)) continue; let s = 0; for (const w of index.files[f]) if (q.has(w)) s++; if (s > 1) scored.push([f, s]); } scored.sort((a, b) => b[1] - a[1]); return scored.slice(0, k || 3).map((x) => x[0]); };
     // ---- inline markdown / command coloring ----
     const paintCode = (c) => (/(^|\s)(node|npm|npx|git|python3?|pip3?|bash|sh|cd|ls|cat|make|cargo|go|docker|curl|grep|sed|rm|mkdir|chmod|sudo)\b/.test(c) || /\s--?\w/.test(c)) ? blue(c) : mag(c);
     const colorMd = (line, inCode) => { if (inCode) return blue(line); if (/^#{1,6}\s/.test(line)) return bold(cyan(line)); let s = line.replace(/`([^`]+)`/g, (_, c) => paintCode(c)).replace(/\*\*([^*]+)\*\*/g, (_, c) => bold(c)); return s.replace(/^(\s*[-*]\s)/, (_, b) => cyan(b)); };
@@ -1584,6 +1597,7 @@ function nexusTui(engine, cwd, nexusMd) {
       transcript.push({ role: "user", text });
       let sendText = inlineAts(text);
       if (pinned.size) { let pre = ""; for (const f of pinned) { try { pre += "\n\n--- pinned: " + f + " ---\n" + fs.readFileSync(path.resolve(cwd, f), "utf8").slice(0, 8000) + "\n--- end " + f + " ---"; } catch (_) {} } if (pre) sendText = pre + "\n\n" + sendText; }
+      if (index && engine === "ollama") { const rel = retrieve(text, 3); if (rel.length) { let pre = ""; for (const f of rel) { try { pre += "\n\n--- context: " + f + " ---\n" + fs.readFileSync(path.resolve(cwd, f), "utf8").slice(0, 6000) + "\n--- end " + f + " ---"; } catch (_) {} } if (pre) { sendText = pre + "\n\n" + sendText; transcript.push({ role: "system", text: "auto-context: pulled " + rel.join(", ") + " from the index" }); } } }
       if (redact && PAID[engine]) { const masked = maskSecrets(sendText); if (masked !== sendText) { const n = (masked.match(/\[redacted:/g) || []).length; transcript.push({ role: "system", text: "redacted " + n + " secret(s) before sending to " + engine + " (privacy mode on)" }); sendText = masked; } }
       const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + sendText : sendText;
       const block = { role: "nexus", items: [] }; transcript.push(block);
@@ -1790,6 +1804,29 @@ function nexusTui(engine, cwd, nexusMd) {
           busy = false; ctl = null; block.summary = res.length + " engines + synthesis  ·  " + ((Date.now() - t0) / 1000).toFixed(1) + "s"; try { saveSession(); } catch (_) {} render();
         });
     };
+    // /bench — run a prompt on each engine and report a speed / tokens / cost table (real cost for claude)
+    const benchEngines = (prompt) => {
+      const members = [...new Set([offline ? "ollama" : engine].concat((hasBin("claude") && !offline) ? ["claude", "ollama"] : ["ollama"]))].slice(0, 3);
+      transcript.push({ role: "user", text: "/bench  " + prompt });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      const t0 = Date.now(); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Benchmarking"; ctl = makeCtl();
+      const cards = members.map((e, i) => ({ type: "tool", id: "bn" + i, name: "Task", label: "Task(" + e + ")", status: "run", start: Date.now(), detail: e }));
+      cards.forEach((c) => block.items.push(c)); startTick(); render();
+      const benchOne = (e) => new Promise((resolve) => { const s = Date.now(); (async () => {
+        if (e === "claude") { let inTok = 0, outTok = 0, cost = 0, txt = ""; await runClaudeStream(prompt, cwd, false, { onText: (t) => { txt += t; }, onResult: (ev) => { const u = ev.usage || {}; inTok = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0); outTok = u.output_tokens || 0; if (typeof ev.total_cost_usd === "number") cost = ev.total_cost_usd; } }, ctl); resolve({ e, ms: Date.now() - s, inTok, outTok, cost, real: true }); }
+        else { let out = ""; try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { out = (await runEngineTask(e, prompt, cwd, false, false, null, ctl)).output; } } catch (_) {} resolve({ e, ms: Date.now() - s, inTok: Math.ceil(prompt.length / 4), outTok: Math.ceil((out || "").length / 4), cost: 0, real: false }); }
+      })(); });
+      Promise.all(members.map((e, i) => Promise.race([benchOne(e), new Promise((r) => setTimeout(() => r({ e, ms: 60000, inTok: 0, outTok: 0, cost: 0, real: false, to: true }), 60000))]).then((r) => { cards[i].status = r.to ? "err" : "ok"; cards[i].end = Date.now(); render(); return r; })))
+        .then((res) => {
+          res.sort((a, b) => a.ms - b.ms);
+          const fastest = res[0] && res[0].e;
+          const pad = (s, n) => (s + " ".repeat(n)).slice(0, n);
+          let tbl = pad("engine", 10) + pad("time", 9) + pad("in", 8) + pad("out", 8) + "cost\n";
+          for (const r of res) tbl += pad(r.e + (r.e === fastest ? " *" : ""), 10) + pad((r.ms / 1000).toFixed(1) + "s", 9) + pad((r.real ? "" : "~") + fmtK(r.inTok), 8) + pad((r.real ? "" : "~") + fmtK(r.outTok), 8) + (r.real ? (r.cost ? "$" + r.cost.toFixed(4) : "-") : "free") + "\n";
+          ensureText().full = "benchmark (* = fastest; ~ = estimated; claude tokens/cost are real):\n\n" + tbl;
+          busy = false; ctl = null; block.summary = res.length + " engines benchmarked  ·  " + ((Date.now() - t0) / 1000).toFixed(1) + "s"; try { saveSession(); } catch (_) {} render();
+        });
+    };
     // /watch <cmd> — run a command; if it fails, have the engine fix the code and re-run, up to 5 tries
     const watchFix = (command) => {
       transcript.push({ role: "user", text: "/watch  " + command });
@@ -1843,7 +1880,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race · /ensemble (synthesize best) · /review · /watch (auto-fix) · /commit · /diff · /explain · /test <file> · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race · /ensemble · /bench · /review · /watch · /commit · /diff · /explain · /test · /index (local RAG) · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact · /notify\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -1878,6 +1915,15 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/pins") transcript.push({ role: "system", text: pinned.size ? ("pinned files (in context every turn):\n" + [...pinned].map((f) => "  " + f).join("\n")) : "no pinned files — /pin <file> to add one" });
       else if (cmd === "/redact") { redact = !redact; transcript.push({ role: "system", text: "cloud redaction " + (redact ? "ON — secrets (API keys, tokens, private keys) are masked before anything is sent to a cloud engine (claude/opencode); local engine is unaffected" : "off") }); }
       else if (cmd === "/ensemble") { if (!argstr) transcript.push({ role: "system", text: "usage: /ensemble <prompt> — asks every engine, then synthesizes the single best answer" }); else ensembleEngines(argstr); }
+      else if (cmd === "/bench") { if (!argstr) transcript.push({ role: "system", text: "usage: /bench <prompt> — runs it on each engine and reports a speed / tokens / cost table" }); else benchEngines(argstr); }
+      else if (cmd === "/index") { const n = buildIndex(); transcript.push({ role: "system", text: "indexed " + n + " file(s) → .nexus/index.json. The local engine will now auto-pull the most relevant files into each prompt." }); }
+      else if (cmd === "/snippet" || cmd === "/snip") {
+        const sub = arg, name = argstr.split(/\s+/)[1], body = argstr.split(/\s+/).slice(2).join(" ");
+        if (sub === "save" && name && body) { snippets[name] = body; saveSnippets(); transcript.push({ role: "system", text: "saved snippet '" + name + "' — use it with /snippet " + name + " (or /snip)" }); }
+        else if ((sub === "del" || sub === "rm") && name) { if (snippets[name]) { delete snippets[name]; saveSnippets(); transcript.push({ role: "system", text: "deleted snippet '" + name + "'" }); } else transcript.push({ role: "system", text: "no snippet '" + name + "'" }); }
+        else if (sub && snippets[sub]) { const rest = argstr.split(/\s+/).slice(1).join(" "); submit(snippets[sub].replace(/\$ARGUMENTS/g, rest).replace(/\$(\d+)/g, (_, n) => rest.split(/\s+/)[+n - 1] || "")); }
+        else transcript.push({ role: "system", text: "usage:  /snippet save <name> <text…>   ·   /snippet <name> [args]   ·   /snippet del <name>   ·   /snippets to list" }); }
+      else if (cmd === "/snippets") { const ks = Object.keys(snippets); transcript.push({ role: "system", text: ks.length ? ("saved snippets:\n" + ks.map((k) => "  " + k + "  " + gray(oneline(snippets[k], 50))).join("\n")) : "no snippets yet — /snippet save <name> <text>" }); }
       else if (cmd === "/explain") { if (arg) submit("Explain, in plain English, what @" + arg + " does and how it works. Do not modify anything."); else { let d = ""; try { d = _cp.execSync("git -c color.ui=never diff HEAD", { cwd, encoding: "utf8" }); } catch (_) {} if (!d.trim()) transcript.push({ role: "system", text: "no uncommitted changes to explain — try /explain <file>" }); else submit("Explain, in plain English, what these uncommitted changes do (do not modify anything):\n\n" + d.slice(0, 8000)); } }
       else if (cmd === "/test") { if (!arg) transcript.push({ role: "system", text: "usage: /test <file> — generate thorough unit tests for it and run them" }); else submit("Write thorough unit tests for @" + arg + ", save them in this project's conventional test location/framework, then run the tests."); }
       else if (cmd === "/tree") { const root = path.resolve(cwd, arg || "."); const out = { lines: [], count: 0 }; const walk = (dir, prefix, depth) => { if (depth > 4 || out.count > 250) return; let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; } ents = ents.filter((e) => !/^(\.git|node_modules|\.nexus|dist|build|\.cache|\.next|target|__pycache__)$/.test(e.name)).sort((a, b) => (b.isDirectory() - a.isDirectory()) || a.name.localeCompare(b.name)); ents.forEach((e, i) => { if (out.count > 250) return; const last = i === ents.length - 1; out.lines.push(prefix + (last ? "└─ " : "├─ ") + e.name + (e.isDirectory() ? "/" : "")); out.count++; if (e.isDirectory()) walk(path.join(dir, e.name), prefix + (last ? "   " : "│  "), depth + 1); }); }; walk(root, "", 0); transcript.push({ role: "system", text: (arg || ".") + "/\n" + (out.lines.join("\n") || "(empty)") + (out.count > 250 ? "\n… (truncated at 250 entries)" : "") }); }
