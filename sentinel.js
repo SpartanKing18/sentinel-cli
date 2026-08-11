@@ -927,10 +927,10 @@ const _cp = require("child_process");
 function hasBin(b) { try { const r = _cp.spawnSync(b, ["--version"], { timeout: 6000 }); return !r.error; } catch (_) { return false; } }
 
 // Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
-function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk, ctl) {
+function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk, ctl, model) {
   return new Promise((resolve) => {
     let cmd, args;
-    if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (cont) args.push("--continue"); if (autonomous) args.push("--dangerously-skip-permissions"); }
+    if (engine === "claude") { cmd = "claude"; args = ["-p", prompt, "--output-format", "text"]; if (cont) args.push("--continue"); if (autonomous) args.push("--dangerously-skip-permissions"); if (model) args.push("--model", model); }
     else if (engine === "opencode") { cmd = "opencode"; args = ["run", prompt]; }
     else return resolve({ ok: false, output: "unknown engine: " + engine });
     let out = "";
@@ -946,11 +946,14 @@ function runEngineTask(engine, prompt, cwd, autonomous, cont, onChunk, ctl) {
 }
 // Claude Code stream-json driver — parses NDJSON events so the TUI can render
 // tool cards, live token usage, cost and context size exactly like Claude Code.
-function runClaudeStream(prompt, cwd, cont, h, ctl, readonly) {
+function runClaudeStream(prompt, cwd, cont, h, ctl, opts) {
+  opts = opts || {};
   return new Promise((resolve) => {
-    const args = readonly ? ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"] : ["-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
+    const args = opts.readonly ? ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"] : ["-p", prompt, "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
     if (cont) args.push("--continue");
-    const cp = _cp.spawn("claude", args, { cwd, env: process.env });
+    if (opts.model) args.push("--model", opts.model);
+    const env = opts.small ? Object.assign({}, process.env, { ANTHROPIC_SMALL_FAST_MODEL: opts.small, CLAUDE_CODE_BG_CLASSIFIER_MODEL: opts.small }) : process.env;
+    const cp = _cp.spawn("claude", args, { cwd, env });
     try { cp.stdin.end(); } catch (_) {} // signal EOF so claude doesn't wait on stdin
     let buf = "", finalText = "", res = null, killed = false;
     if (ctl) ctl.kill = () => { killed = true; try { cp.kill("SIGINT"); } catch (_) {} setTimeout(() => { try { cp.kill("SIGKILL"); } catch (_) {} }, 1500); };
@@ -1053,7 +1056,7 @@ function runHooks(hooks, event, env, cwd) {
 // build an AbortSignal wired to a ctl's kill list (so ctrl+c aborts in-flight ollama requests)
 function ctlSignal(ctl) { if (!ctl || !ctl.kids) return undefined; const ac = new AbortController(); ctl.kids.push(() => { try { ac.abort(); } catch (_) {} }); return ac.signal; }
 // ---------- Parallel sub-agents: fan a list of independent tasks out across the current engine ----------
-async function runSubagents(engine, tasks, cwd, model, onProgress, ctl) {
+async function runSubagents(engine, tasks, cwd, model, onProgress, ctl, pickModel) {
   const path = require("path"), fs = require("fs"), os = require("os");
   const results = new Array(tasks.length);
   // Isolate each concurrent agent in its own git worktree so parallel writers can't
@@ -1071,7 +1074,7 @@ async function runSubagents(engine, tasks, cwd, model, onProgress, ctl) {
     let dir = cwd;
     if (useWt) { const wt = path.join(os.tmpdir(), "nexus-agent-" + stamp + "-" + i); try { _cp.execSync("git worktree add --detach " + JSON.stringify(wt) + " " + baseCommit, { cwd, stdio: "ignore" }); worktrees[i] = dir = wt; } catch (_) { dir = cwd; } }
     let out;
-    try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", dir, ctlSignal(ctl)); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], dir, true, false, null, ctl); out = (r.output || "").trim(); } }
+    try { if (engine === "ollama") { const r = await ollamaExec(model, tasks[i], "", dir, ctlSignal(ctl)); out = (r.output || "").trim(); } else { const r = await runEngineTask(engine, tasks[i], dir, true, false, null, ctl, pickModel ? pickModel(tasks[i]) : undefined); out = (r.output || "").trim(); } }
     catch (e) { out = "error: " + e.message; }
     results[i] = out; if (onProgress) onProgress(i, "done");
   };
@@ -1147,6 +1150,22 @@ async function deviceTool(name, a, cwd) {
   if (name === "copy" || name === "copy_file") { try { fs.copyFileSync(rp(a.from || a.src), rp(a.to || a.dest)); return { ok: true }; } catch (e) { return { error: e.message }; } }
   if (name === "delete" || name === "delete_file" || name === "rm") { try { fs.rmSync(rp(a.path), { recursive: !!a.recursive, force: true }); return { ok: true }; } catch (e) { return { error: e.message }; } }
   return null;
+}
+// ---------- cost-aware model tiering for /cowork ----------
+// Rough Claude price table ($ per 1M tokens: input, output). Used only to ESTIMATE
+// whether delegating a task to a cheaper model saves more than the delegation overhead.
+const MODEL_PRICE = [[/opus/i, { in: 15, out: 75 }], [/sonnet/i, { in: 3, out: 15 }], [/haiku/i, { in: 0.8, out: 4 }], [/fable/i, { in: 1, out: 5 }]];
+function priceOf(m) { for (const [re, p] of MODEL_PRICE) if (re.test(String(m || ""))) return p; return { in: 3, out: 15 }; }
+// Is a task "mechanical" (cheap — safe to run on the weak model)?
+function isMechanical(text) { return /\b(run|running|execute|exec|test|tests|lint|format|prettier|build|compile|install|npm|yarn|pnpm|pip|cargo|go build|make|rename|move|copy|delete|remove|mkdir|list|find|search|grep|read|show|print|cat|commit|status|diff|log|clean|typecheck|type-check|check|verify)\b/i.test(String(text || "")) && !/\b(implement|refactor|design|architect|debug|fix the bug|write the|create the|algorithm|optimi[sz]e|redesign|rewrite)\b/i.test(String(text || "")); }
+// Estimate whether delegating (est output/input tokens) to `weak` beats the fixed overhead of re-sending context.
+function shouldDelegate(estOutTok, estInTok, strong, weak) {
+  if (!weak || !strong || weak === strong) return false;
+  const sp = priceOf(strong), wp = priceOf(weak);
+  if (wp.out >= sp.out) return false; // weak isn't actually cheaper
+  const saved = (estOutTok / 1e6) * (sp.out - wp.out) + (estInTok / 1e6) * (sp.in - wp.in);
+  const overhead = (2000 / 1e6) * (sp.in + wp.in); // extra context round-trip both ways
+  return saved > overhead;
 }
 // Sentinel preflight — classify a shell command's destructive intent (inspired by Glitch's
 // Sentinel, improved: names the matched rule, covers pipe-to-shell + fork bombs, 3 levels).
@@ -1393,7 +1412,10 @@ function nexusTui(engine, cwd, nexusMd) {
     const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
     let ctl = null, costCap = 0, rate = null, warned50 = false, pasteBuf = null, notify = false, redact = false, offline = false, guard = "enforce"; // …, guard: enforce|warn|off
-    const impact = { localTurns: 0, cloudTurns: 0, localTok: 0, cloudInTok: 0, cloudOutTok: 0, cloudCost: 0, ctxSavedTok: 0 }; // Impact Receipt tallies
+    const impact = { localTurns: 0, cloudTurns: 0, localTok: 0, cloudInTok: 0, cloudOutTok: 0, cloudCost: 0, ctxSavedTok: 0, coworkSaved: 0, delegated: 0 }; // Impact Receipt tallies
+    let cowork = { on: false, strong: "", weak: "" }; // two-model cost-saver: strong codes, weak does cheap/mechanical work
+    // model to use for an auxiliary claude call (commit/review/plan/dream): the weak model when cowork is on
+    const auxModel = () => (cowork.on && engine === "claude") ? cowork.weak : undefined;
     const checkpoints = [], redoStack = [], pinned = new Set();       // { tree, label, ts }; pinned = sticky context files
     // interrupt controller: .stopped is polled by loops; .kids are killers (child procs / aborts) fired on ctrl+c
     const makeCtl = () => ({ stopped: false, kids: [], kill() { this.stopped = true; for (const k of this.kids.splice(0)) { try { k(); } catch (_) {} } } });
@@ -1438,7 +1460,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/ensemble", "all engines answer, then synthesize the best"], ["/bench", "speed / tokens / cost table per engine"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
       ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
-      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
+      ["/cowork", "strong model codes, weak model does cheap work"], ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"], ["/offline", "local-only privacy lock"],
       ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
@@ -1553,6 +1575,7 @@ function nexusTui(engine, cwd, nexusMd) {
       if (redact) parts.push(yellow("redact"));
       if (offline) parts.push(green("offline"));
       if (guard !== "enforce") parts.push((guard === "off" ? red : yellow)("guard:" + guard));
+      if (cowork.on) parts.push(mag("cowork " + cowork.strong.replace(/^claude-|-\d.*$/g, "") + "→" + cowork.weak.replace(/^claude-|-\d.*$/g, "")));
       parts.push(MODES[mode].c(MODES[mode].k));
       return "  " + clip(parts.join(gray("  ·  ")), cols() - 3);
     };
@@ -1691,7 +1714,7 @@ function nexusTui(engine, cwd, nexusMd) {
             if (typeof ev.total_cost_usd === "number") sess.cost += ev.total_cost_usd;
             const mu = ev.modelUsage && ev.modelUsage[sess.model]; if (mu && mu.contextWindow) sess.ctxWindow = mu.contextWindow;
           },
-        }, ctl).then(finish);
+        }, ctl, cowork.on ? { model: cowork.strong, small: cowork.weak } : undefined).then(finish);
       } else if (engine === "opencode") {
         runEngineTask("opencode", promptText, cwd, true, cont, (chunk) => { ensureText().full += chunk; sess.liveOut += Math.ceil(chunk.length / 4); render(); }, ctl)
           .then((res) => { sess.inTok += Math.ceil(promptText.length / 4); sess.outTok += Math.ceil((res.output || "").length / 4); sess.ctxUsed = sess.inTok + sess.outTok; finish(res); });
@@ -1763,7 +1786,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const cards = tasks.map((tk, i) => ({ type: "tool", id: "ag" + i, name: "Task", label: "Task(" + oneline(tk, 30) + ")", status: "run", start: Date.now(), detail: tk }));
       cards.forEach((c) => block.items.push(c));
       startTick(); render();
-      const agentsCtl = ctl; (async () => { const mdl = engine === "ollama" ? (sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags())) : sess.model; return runSubagents(engine, tasks, cwd, mdl, (i, phase) => { if (phase === "done") { cards[i].status = "ok"; cards[i].end = Date.now(); activeAgents = Math.max(0, activeAgents - 1); } render(); }, agentsCtl); })()
+      const agentsCtl = ctl; const pick = (cowork.on && engine === "claude") ? ((t) => { const est = Math.ceil(t.length / 4) + 800; if (isMechanical(t) && shouldDelegate(est, est * 4, cowork.strong, cowork.weak)) { impact.delegated++; impact.coworkSaved += (priceOf(cowork.strong).out - priceOf(cowork.weak).out) * (est * 3) / 1e6; return cowork.weak; } return cowork.strong; }) : null; (async () => { const mdl = engine === "ollama" ? (sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags())) : sess.model; return runSubagents(engine, tasks, cwd, mdl, (i, phase) => { if (phase === "done") { cards[i].status = "ok"; cards[i].end = Date.now(); activeAgents = Math.max(0, activeAgents - 1); } render(); }, agentsCtl, pick); })()
         .then((outs) => {
           const t = ensureText();
           t.full = outs.map((o, i) => "### agent " + (i + 1) + " — " + oneline(tasks[i], 60) + "\n" + (o || "(no output)")).join("\n\n");
@@ -1818,7 +1841,7 @@ function nexusTui(engine, cwd, nexusMd) {
       })();
     };
     // ask one engine a question (no file changes) — used by /ensemble
-    const engineAnswer = async (e, prompt) => { try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); return await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } return (await runEngineTask(e, prompt, cwd, false, false, null, ctl)).output; } catch (err) { return "error: " + err.message; } };
+    const engineAnswer = async (e, prompt) => { try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); return await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } return (await runEngineTask(e, prompt, cwd, false, false, null, ctl, (cowork.on && e === "claude") ? cowork.weak : undefined)).output; } catch (err) { return "error: " + err.message; } };
     // /ensemble — run the prompt on every engine, then synthesize the single best answer
     const ensembleEngines = (prompt) => {
       const avail = []; if (hasBin("claude") && !offline) avail.push("claude"); avail.push("ollama");
@@ -1849,7 +1872,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const cards = members.map((e, i) => ({ type: "tool", id: "bn" + i, name: "Task", label: "Task(" + e + ")", status: "run", start: Date.now(), detail: e }));
       cards.forEach((c) => block.items.push(c)); startTick(); render();
       const benchOne = (e) => new Promise((resolve) => { const s = Date.now(); (async () => {
-        if (e === "claude") { let inTok = 0, outTok = 0, cost = 0, txt = ""; await runClaudeStream(prompt, cwd, false, { onText: (t) => { txt += t; }, onResult: (ev) => { const u = ev.usage || {}; inTok = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0); outTok = u.output_tokens || 0; if (typeof ev.total_cost_usd === "number") cost = ev.total_cost_usd; } }, ctl, true); resolve({ e, ms: Date.now() - s, inTok, outTok, cost, real: true }); }
+        if (e === "claude") { let inTok = 0, outTok = 0, cost = 0, txt = ""; await runClaudeStream(prompt, cwd, false, { onText: (t) => { txt += t; }, onResult: (ev) => { const u = ev.usage || {}; inTok = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0); outTok = u.output_tokens || 0; if (typeof ev.total_cost_usd === "number") cost = ev.total_cost_usd; } }, ctl, { readonly: true }); resolve({ e, ms: Date.now() - s, inTok, outTok, cost, real: true }); }
         else { let out = ""; try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { out = (await runEngineTask(e, prompt, cwd, false, false, null, ctl)).output; } } catch (_) {} resolve({ e, ms: Date.now() - s, inTok: Math.ceil(prompt.length / 4), outTok: Math.ceil((out || "").length / 4), cost: 0, real: false }); }
       })(); });
       Promise.all(members.map((e, i) => Promise.race([benchOne(e), new Promise((r) => setTimeout(() => r({ e, ms: 60000, inTok: 0, outTok: 0, cost: 0, real: false, to: true }), 60000))]).then((r) => { cards[i].status = r.to ? "err" : "ok"; cards[i].end = Date.now(); render(); return r; })))
@@ -1889,7 +1912,8 @@ function nexusTui(engine, cwd, nexusMd) {
           if (ctl && ctl.stopped) break;
           const t = plan[i]; if (t.done) continue;
           t.running = true; const card = { type: "tool", id: "pt" + i, name: "Task", label: "Task(" + oneline(t.text, 30) + ")", status: "run", start: Date.now() }; block.items.push(card); activeAgents = 1; render();
-          try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); await ollamaExec(mdl, t.text, "", cwd, aSignal(ctl)); } else { await runEngineTask(engine, t.text, cwd, true, false, null, ctl); } } catch (_) {}
+          let taskModel; if (cowork.on && engine === "claude") { const mech = isMechanical(t.text); const est = Math.ceil(t.text.length / 4) + 800; taskModel = (mech && shouldDelegate(est, est * 4, cowork.strong, cowork.weak)) ? cowork.weak : cowork.strong; if (taskModel === cowork.weak) { impact.delegated++; impact.coworkSaved += (priceOf(cowork.strong).out - priceOf(cowork.weak).out) * (est * 3) / 1e6; card.label += " " + gray("· " + cowork.weak); } }
+          try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); await ollamaExec(mdl, t.text, "", cwd, aSignal(ctl)); } else { await runEngineTask(engine, t.text, cwd, true, false, null, ctl, taskModel); } } catch (_) {}
           t.running = false; t.done = true; savePlan(); card.status = "ok"; card.end = Date.now(); activeAgents = 0; render();
         }
         ensureText().full = plan.every((t) => t.done) ? "all plan tasks completed." : "stopped — some tasks remain (/plan run to resume).";
@@ -1933,7 +1957,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const card = { type: "tool", id: "cm", name: "Task", label: "Task(commit message)", status: "run", start: Date.now() }; block.items.push(card); startTick(); render();
       (async () => {
         const prompt = "Write a Conventional-Commits message for this diff: a single subject line under 72 chars (type: summary), optionally a short body. Output ONLY the message, no backticks, no preamble.\n\n" + diff.slice(0, 6000);
-        let msg = ""; try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); msg = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { msg = (await runEngineTask(engine, prompt, cwd, false, false, null, ctl)).output; } } catch (_) {}
+        let msg = ""; try { if (engine === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); msg = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { msg = (await runEngineTask(engine, prompt, cwd, false, false, null, ctl, auxModel())).output; } } catch (_) {}
         msg = (msg || "").replace(/```[a-z]*\n?|```/g, "").trim().split("\n").slice(0, 8).join("\n").trim() || "chore: update";
         card.status = "ok"; card.end = Date.now();
         let done = false; try { const subj = msg.split("\n")[0], body = msg.split("\n").slice(1).join("\n").trim(); _cp.execSync("git commit -m " + JSON.stringify(subj) + (body ? " -m " + JSON.stringify(body) : ""), { cwd, stdio: "ignore" }); done = true; } catch (_) {}
@@ -1949,7 +1973,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /race · /ensemble · /bench · /review · /watch · /plan · /guard (safety) · /impact · /gaps · /dream · /commit · /diff · /git · /blame · /explain · /test · /index · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nunique:  /cowork (save cost: strong+weak model) · /race · /ensemble · /bench · /review · /watch · /plan · /guard · /impact · /gaps · /dream · /commit · /diff · /git · /blame · /explain · /test · /index · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -1986,7 +2010,12 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/ensemble") { if (!argstr) transcript.push({ role: "system", text: "usage: /ensemble <prompt> — asks every engine, then synthesizes the single best answer" }); else ensembleEngines(argstr); }
       else if (cmd === "/bench") { if (!argstr) transcript.push({ role: "system", text: "usage: /bench <prompt> — runs it on each engine and reports a speed / tokens / cost table" }); else benchEngines(argstr); }
       else if (cmd === "/guard") { if (["enforce", "warn", "off"].includes(arg)) { guard = arg; transcript.push({ role: "system", text: "Sentinel guard set to " + arg + (arg === "enforce" ? " — destructive agent commands (rm -rf, git reset --hard, dd, mkfs, pipe-to-shell, fork bombs, …) are blocked" : arg === "warn" ? " — destructive commands are flagged but allowed" : " — destructive-command checks disabled") }); } else transcript.push({ role: "system", text: "Sentinel guard is " + guard + ".  usage: /guard enforce|warn|off  — preflights the local agent's shell commands for destructive intent" }); }
-      else if (cmd === "/impact") { const BLEND = 6; const avoided = (impact.localTok / 1e6) * BLEND; transcript.push({ role: "system", text: "Impact Receipt (this session):\n  local turns   " + impact.localTurns + "   free · ~" + fmtK(impact.localTok) + " tokens\n  cloud turns   " + impact.cloudTurns + "   ↑" + fmtK(impact.cloudInTok) + " ↓" + fmtK(impact.cloudOutTok) + " tok · $" + impact.cloudCost.toFixed(4) + "\n  cost avoided  ~$" + avoided.toFixed(4) + "   (est. if those local turns had run on the cloud @ ~$" + BLEND + "/M tokens)\n  net: spent $" + impact.cloudCost.toFixed(4) + ", avoided ~$" + avoided.toFixed(4) + " by keeping " + impact.localTurns + " turn(s) local" }); }
+      else if (cmd === "/cowork") { const pp = argstr.split(/\s+/).filter(Boolean);
+        if (pp[0] === "off") { cowork = { on: false, strong: "", weak: "" }; transcript.push({ role: "system", text: "cowork off — single-model mode" }); }
+        else if (pp.length >= 2 && pp[0] !== pp[1]) { cowork = { on: true, strong: pp[0], weak: pp[1] }; transcript.push({ role: "system", text: "cowork ON — " + pp[0] + " does the coding; " + pp[1] + " handles cheap/mechanical work (tests, builds, commit messages, reviews, plan steps) whenever the CLI estimates it saves more than the delegation overhead. Claude Code's background model is also pointed at " + pp[1] + ", so " + pp[0] + " burns fewer tokens on summaries/classification." + (engine !== "claude" ? "\n(note: cowork only applies to the claude engine — /engine claude to use it)" : "") }); }
+        else if (pp.length) transcript.push({ role: "system", text: "cowork needs two DIFFERENT models (same model is just normal claude).  usage: /cowork <strong-model> <weak-model>  —  e.g. /cowork opus haiku  or  /cowork claude-opus-4-8 claude-haiku-4-5" });
+        else transcript.push({ role: "system", text: cowork.on ? ("cowork: " + cowork.strong + " (code) + " + cowork.weak + " (cheap work) — " + impact.delegated + " task(s) delegated so far") : "cowork off.  usage: /cowork <strong> <weak>  ·  e.g. /cowork opus haiku  ·  /cowork off" }); }
+      else if (cmd === "/impact") { const BLEND = 6; const avoided = (impact.localTok / 1e6) * BLEND; transcript.push({ role: "system", text: "Impact Receipt (this session):\n  local turns   " + impact.localTurns + "   free · ~" + fmtK(impact.localTok) + " tokens\n  cloud turns   " + impact.cloudTurns + "   ↑" + fmtK(impact.cloudInTok) + " ↓" + fmtK(impact.cloudOutTok) + " tok · $" + impact.cloudCost.toFixed(4) + "\n  cost avoided  ~$" + avoided.toFixed(4) + "   (est. if those local turns had run on the cloud @ ~$" + BLEND + "/M tokens)" + (cowork.on || impact.delegated ? "\n  cowork        " + impact.delegated + " task(s) delegated to " + (cowork.weak || "the weak model") + " · ~$" + impact.coworkSaved.toFixed(4) + " saved" : "") + "\n  net: spent $" + impact.cloudCost.toFixed(4) + ", avoided ~$" + (avoided + impact.coworkSaved).toFixed(4) }); }
       else if (cmd === "/gaps") { try { const files = _cp.execSync("git ls-files", { cwd, encoding: "utf8" }).split("\n").filter(Boolean); const found = []; for (const f of files) { try { if (fs.statSync(path.join(cwd, f)).size > 400000) continue; const lines = fs.readFileSync(path.join(cwd, f), "utf8").split("\n"); for (let i = 0; i < lines.length; i++) { const m = lines[i].match(/\b(TODO|FIXME|HACK|XXX|BUG)\b[:\s-]*(.*)/); if (m) found.push({ file: f, line: i + 1, kind: m[1], text: (m[2] || "").trim().slice(0, 80) }); } } catch (_) {} } if (arg === "plan") { if (!found.length) transcript.push({ role: "system", text: "no gaps to turn into a plan" }); else { plan = found.slice(0, 30).map((g) => ({ text: "resolve " + g.kind + " in " + g.file + ":" + g.line + (g.text ? " — " + g.text : ""), done: false })); savePlan(); transcript.push({ role: "system", text: "turned " + plan.length + " gap(s) into a plan — /plan run to work through them" }); transcript.push({ role: "plan" }); } } else transcript.push({ role: "system", text: found.length ? ("gaps (" + found.length + " TODO/FIXME/HACK/XXX/BUG):\n" + found.slice(0, 40).map((g) => "  " + g.file + ":" + g.line + "  " + g.kind + (g.text ? " " + g.text : "")).join("\n") + (found.length > 40 ? "\n  … and " + (found.length - 40) + " more" : "") + "\n/gaps plan turns these into a checklist") : "no TODO/FIXME/HACK/XXX/BUG markers in tracked files" }); } catch (_) { transcript.push({ role: "system", text: "/gaps needs a git repo (uses git ls-files)" }); } }
       else if (cmd === "/dream") { const conv = transcript.filter((m) => m.role === "user" || m.role === "nexus").slice(-16); if (!conv.length) { transcript.push({ role: "system", text: "nothing to consolidate yet — have a conversation first" }); render(); return; } transcript.push({ role: "user", text: "/dream" }); const block = { role: "nexus", items: [] }; transcript.push(block); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Dreaming"; ctl = makeCtl(); const card = { type: "tool", id: "dr", name: "Task", label: "Task(consolidate memory)", status: "run", start: Date.now() }; block.items.push(card); startTick(); render(); (async () => {
         const digest = conv.map((m) => m.role === "user" ? "USER: " + m.text : "NEXUS: " + (m.items || []).filter((it) => it.type === "text").map((it) => it.full).join(" ")).join("\n").slice(0, 8000);
