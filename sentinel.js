@@ -737,9 +737,11 @@ async function cli(args) {
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
   else if (cmd === "init") nexusInit();
+  else if (cmd === "docs" || cmd === "doc" || (cmd === "help" && rest[0])) nexusDocs(rest[0]);
   else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {
     const sub = (rest[0] || "").toLowerCase();
     if (sub === "init") nexusInit();
+    else if (sub === "docs" || sub === "doc") nexusDocs(rest[1]);
     else if (sub === "run" || sub === "supervise" || sub === "loop") await nexusRun(rest.slice(1));
     else if (sub === "overnight") await nexusRun(["--overnight"].concat(rest.slice(1)));
     else if (sub === "agents" || sub === "parallel") await nexusAgents(rest.slice(1));
@@ -781,6 +783,46 @@ function coderShell(command, cwd) {
     p.on("close", (code) => { clearTimeout(to); resolve({ code, output: out.length > cap ? out.slice(0, cap) + "\n...[truncated]" : (out || "(no output)") }); });
     p.on("error", (e) => { clearTimeout(to); resolve({ code: -1, output: "spawn error: " + e.message }); });
   });
+}
+// ---------- Nexus documentation (shared by `sentinel docs` and the TUI /docs browser) ----------
+const NEXUS_DOCS = {
+  overview: { title: "Overview", body:
+    "Nexus is a terminal AI coding agent built into the Sentinel CLI. It drives one of three\nengines from a single dependency-free binary:\n  claude    — the Claude Code CLI in the cloud (strongest; needs `claude` installed + logged in)\n  ollama    — a free, private, local model on your machine (needs Ollama)\n  opencode  — the OpenCode CLI\n\nIt reads & writes files, runs commands, checkpoints every change, shows real token cost\nlive, saves tokens by delegating cheap work to a weaker/local model, and keeps secrets off\nthe cloud. Launch it with `sentinel nexus --tui`. Type / inside for the command menu." },
+  quickstart: { title: "Quick start", body:
+    "  sentinel init                 scaffold .nexus/ (project context Nexus reads each session)\n  sentinel nexus --tui          full-screen agent (Claude if installed, else local)\n  sentinel nexus --tui -e ollama  drive a 100% local, private, free agent\n  sentinel nexus \"add tests to server.js and run them\"   one-shot task\n\nFree local setup:\n  curl -fsSL https://ollama.com/install.sh | sh\n  ollama pull qwen2.5-coder      # or hermes3" },
+  engines: { title: "Engines & models", body:
+    "  /engine claude|ollama|opencode   switch engine\n  /model [name]                    show/set the model\n  /models                          list cloud tiers + installed local models\n  /fallback <model>                auto-retry on a cheaper model when rate-limited\n  /cowork <strong> <weak>          strong model codes; weak (cheaper Claude tier OR\n                                   a free local model via ollama:<name>) does cheap work\n  Aliases: opus · sonnet · haiku · fable (or full names like claude-haiku-4-5-...)" },
+  cost: { title: "Saving cost", body:
+    "In rough order of impact:\n  /cowork opus ollama:qwen2.5-coder   free local worker does tests/builds/commit msgs\n  /lean                               minimal output (output tokens cost the most)\n  /effort low                         less thinking on mechanical work\n  /index                              local model auto-pulls only relevant files\n  /budget 5                           hard cap (also enforced mid-turn)\n  /estimate <prompt>                  rough cost before you send\n  /impact                             what you saved this session\n  /cheap                              preset: lean + low effort" },
+  multiengine: { title: "Multi-engine", body:
+    "  /race <prompt>       every engine answers at once; keep the best (fastest marked)\n  /ensemble <prompt>   every engine answers, then one synthesizes the single best\n  /review [engine]     a different engine critiques the last answer\n  /bench <prompt>      speed / tokens / cost table per engine (read-only)" },
+  build: { title: "Build & verify", body:
+    "  /plan <goal>         editable checklist (/plan run · /plan add · /plan done N)\n  /watch <cmd>         run a command; auto-fix the code and re-run until it passes\n  /test <file>         generate + run unit tests\n  /agents a ;; b ;; c  run independent tasks in parallel (each in an isolated git worktree)" },
+  git: { title: "Git & checkpoints", body:
+    "A git checkpoint is taken before every file-changing turn.\n  /undo /redo /rewind N   restore only the files Nexus changed (unrelated edits kept)\n  /diff /git /blame /recent  session diff · status+log · line authorship · recent files\n  /commit                    AI commit message + commit" },
+  safety: { title: "Safety & privacy", body:
+    "  /guard enforce|warn|off  preflight destructive shell commands (rm -rf, dd, pipe-to-shell…)\n  /secrets                 scan the repo for leaked credentials\n  /scan <host>             quick TCP port scan\n  /redact                  mask secrets before anything is sent to a cloud engine\n  /offline                 local-only lock — nothing leaves the machine" },
+  context: { title: "Context", body:
+    "  @file        inline a file into your message (Tab completes the path)\n  !cmd         run a shell command inline\n  #note        save a durable memory to .nexus/NEXUS.md\n  /pin <file>  keep a file in context every turn\n  /tree        project file tree\n  /index       build a keyword index for local auto-context\n  /compact /context   shrink & inspect the context window\n  \\ + Enter    continue on a new line" },
+  session: { title: "Session", body:
+    "  /resume      reload the last saved session (.nexus/session.json)\n  /export      write the conversation to a markdown file\n  /copy        copy the last reply to the clipboard\n  /dream       consolidate the session into NEXUS.md memory\n  /gaps        list TODO/FIXME/HACK markers (/gaps plan → checklist)\n  /status /doctor /impact   session status · health · savings receipt" },
+  keys: { title: "Keyboard", body:
+    "  Enter          send        \\ then Enter   newline\n  Shift+Tab      cycle mode (normal / auto-accept / plan)\n  Ctrl+O         expand tool detail\n  Ctrl+C         stop the current turn (again to quit)\n  Up / Down      input history      Tab   complete /command or @path\n  wheel · PgUp/PgDn · Home/End   scroll" },
+  config: { title: "Project config (.nexus/)", body:
+    "  NEXUS.md        project instructions loaded every session (given to ALL engines)\n  config.json     { engine, model }\n  mcp.json        MCP servers: { mcpServers: { name: { command, args } } }\n  hooks.json      shell hooks: UserPromptSubmit · PreToolUse · PostToolUse · Stop\n  commands/*.md   custom /commands (body = prompt, $ARGUMENTS substituted)\n  snippets.json · plan.json · index.json · session.json   (auto-managed; gitignored)" },
+  env: { title: "Environment", body:
+    "  SENTINEL_MODEL   default local model for the ollama engine\n  OLLAMA_HOST / OLLAMA_PORT   point at a remote Ollama (default 127.0.0.1:11434)\n  OLLAMA_TIMEOUT   local request timeout ms (default 300000)\n  NO_COLOR=1       disable colored output" },
+};
+const DOC_ORDER = ["overview", "quickstart", "engines", "cost", "multiengine", "build", "git", "safety", "context", "session", "keys", "config", "env"];
+function docList() { return DOC_ORDER.map((k) => "  " + k.padEnd(12) + gray(NEXUS_DOCS[k].title)).join("\n"); }
+function nexusDocs(topic) {
+  banner();
+  const key = (topic || "").toLowerCase().replace(/^\//, "");
+  if (!key || key === "help") { console.log("  " + bold("Nexus documentation") + "\n\n  " + gray("sentinel docs <topic>") + "  ·  topics:\n\n" + docList() + "\n\n  " + gray("or read it all: ") + cyan("sentinel docs all") + "\n"); return; }
+  if (key === "all") { for (const k of DOC_ORDER) { console.log("\n  " + bold(cyan("▌ " + NEXUS_DOCS[k].title))); console.log("  " + NEXUS_DOCS[k].body.replace(/\n/g, "\n  ") + "\n"); } return; }
+  const d = NEXUS_DOCS[key] || Object.entries(NEXUS_DOCS).find(([k, v]) => k.startsWith(key) || v.title.toLowerCase().includes(key))?.[1];
+  if (!d) { console.log("  " + red("no doc topic '" + key + "'") + "\n\n  topics:\n" + docList() + "\n"); return; }
+  console.log("  " + bold(cyan("▌ " + d.title)) + "\n\n  " + d.body.replace(/\n/g, "\n  ") + "\n");
 }
 function nexusHelp() {
   banner();
@@ -1472,7 +1514,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
       ["/cowork", "strong model codes, weak model does cheap work"], ["/cheap", "max-savings preset (lean + low effort)"], ["/lean", "ask for minimal output (saves output tokens)"], ["/effort", "claude thinking level: low|medium|high"], ["/estimate", "rough token/cost of a prompt before sending"], ["/fallback", "auto-switch model on rate-limit"],
-      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/models", "list cloud & local models"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
+      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/models", "list cloud & local models"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"], ["/offline", "local-only privacy lock"],
       ["/expand", "toggle tool-call detail"], ["/exit", "quit Nexus"],
     ];
@@ -2040,7 +2082,8 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/models") { transcript.push({ role: "system", text: "checking local models…" }); render(); ollamaTags().then((ms) => { transcript.push({ role: "system", text: "models:\n  cloud (claude) — " + (hasBin("claude") ? "opus · sonnet · haiku · fable  (use via /model, /cowork, /effort)" : "claude CLI not installed") + "\n  local (ollama) — " + (ms.length ? ms.join(", ") : "none — `ollama pull hermes3`") + "\n  use as a free cowork worker: /cowork opus ollama:<name>" }); render(); }).catch(() => { transcript.push({ role: "system", text: "could not reach Ollama for the local model list" }); render(); }); }
       else if (cmd === "/recent") { try { let files = _cp.execSync("git log -12 --name-only --pretty=format:", { cwd, encoding: "utf8" }); let list = [...new Set(files.split("\n").filter(Boolean))]; if (!list.length) { try { list = [...new Set(_cp.execSync("git ls-files -m -o --exclude-standard", { cwd, encoding: "utf8" }).split("\n").filter(Boolean))]; } catch (_) {} } transcript.push({ role: "system", text: list.length ? ("recently changed files (last commits):\n" + list.slice(0, 30).map((f) => "  " + f).join("\n") + (list.length > 30 ? "\n  … +" + (list.length - 30) + " more" : "") + "\n(tip: /pin one to keep it in context)") : "no changes found" }); } catch (_) { transcript.push({ role: "system", text: "/recent needs a git repo" }); } }
       else if (cmd === "/keys") transcript.push({ role: "system", text: "keys:\n  Enter          send   ·   \\ then Enter = newline\n  Shift+Tab      cycle mode (normal / auto-accept / plan)\n  Ctrl+O         expand tool detail   ·   Ctrl+C  stop turn (again = quit)\n  ↑ / ↓          input history   ·   Tab  complete /command or @path\n  wheel · PgUp/PgDn · Home/End   scroll\n  prefixes:  /command  ·  @file  ·  !shell  ·  #note" });
-      else if (cmd === "/version" || cmd === "/about") transcript.push({ role: "system", text: "Nexus (sentinel " + VERSION + ") — the multi-engine AI coding agent. Engines: claude · ollama (local) · opencode. Type / for ~55 commands." });
+      else if (cmd === "/version" || cmd === "/about") transcript.push({ role: "system", text: "Nexus (sentinel " + VERSION + ") — the multi-engine AI coding agent. Engines: claude · ollama (local) · opencode. Type / for the command menu." });
+      else if (cmd === "/docs" || cmd === "/doc" || cmd === "/help?") { const key = (arg || "").toLowerCase().replace(/^\//, ""); scroll = 0; if (!key) transcript.push({ role: "system", text: "docs — /docs <topic> (or /docs all):\n" + DOC_ORDER.map((k) => "  " + k.padEnd(12) + NEXUS_DOCS[k].title).join("\n") }); else if (key === "all") transcript.push({ role: "system", text: DOC_ORDER.map((k) => "── " + NEXUS_DOCS[k].title + " ──\n" + NEXUS_DOCS[k].body).join("\n\n") }); else { const d = NEXUS_DOCS[key] || Object.entries(NEXUS_DOCS).find(([k, v]) => k.startsWith(key) || v.title.toLowerCase().includes(key))?.[1]; transcript.push({ role: "system", text: d ? (d.title + "\n\n" + d.body) : ("no doc topic '" + key + "' — /docs to list topics") }); } }
       else if (cmd === "/impact") { const BLEND = 6; const avoided = (impact.localTok / 1e6) * BLEND; transcript.push({ role: "system", text: "Impact Receipt (this session):\n  local turns   " + impact.localTurns + "   free · ~" + fmtK(impact.localTok) + " tokens\n  cloud turns   " + impact.cloudTurns + "   ↑" + fmtK(impact.cloudInTok) + " ↓" + fmtK(impact.cloudOutTok) + " tok · $" + impact.cloudCost.toFixed(4) + "\n  cost avoided  ~$" + avoided.toFixed(4) + "   (est. if those local turns had run on the cloud @ ~$" + BLEND + "/M tokens)" + (cowork.on || impact.delegated ? "\n  cowork        " + impact.delegated + " task(s) delegated to " + (cowork.weak || "the weak model") + " · ~$" + impact.coworkSaved.toFixed(4) + " saved" : "") + "\n  net: spent $" + impact.cloudCost.toFixed(4) + ", avoided ~$" + (avoided + impact.coworkSaved).toFixed(4) }); }
       else if (cmd === "/gaps") { try { const files = _cp.execSync("git ls-files", { cwd, encoding: "utf8" }).split("\n").filter(Boolean); const found = []; for (const f of files) { try { if (fs.statSync(path.join(cwd, f)).size > 400000) continue; const lines = fs.readFileSync(path.join(cwd, f), "utf8").split("\n"); for (let i = 0; i < lines.length; i++) { const m = lines[i].match(/\b(TODO|FIXME|HACK|XXX|BUG)\b[:\s-]*(.*)/); if (m) found.push({ file: f, line: i + 1, kind: m[1], text: (m[2] || "").trim().slice(0, 80) }); } } catch (_) {} } if (arg === "plan") { if (!found.length) transcript.push({ role: "system", text: "no gaps to turn into a plan" }); else { plan = found.slice(0, 30).map((g) => ({ text: "resolve " + g.kind + " in " + g.file + ":" + g.line + (g.text ? " — " + g.text : ""), done: false })); savePlan(); transcript.push({ role: "system", text: "turned " + plan.length + " gap(s) into a plan — /plan run to work through them" }); transcript.push({ role: "plan" }); } } else transcript.push({ role: "system", text: found.length ? ("gaps (" + found.length + " TODO/FIXME/HACK/XXX/BUG):\n" + found.slice(0, 40).map((g) => "  " + g.file + ":" + g.line + "  " + g.kind + (g.text ? " " + g.text : "")).join("\n") + (found.length > 40 ? "\n  … and " + (found.length - 40) + " more" : "") + "\n/gaps plan turns these into a checklist") : "no TODO/FIXME/HACK/XXX/BUG markers in tracked files" }); } catch (_) { transcript.push({ role: "system", text: "/gaps needs a git repo (uses git ls-files)" }); } }
       else if (cmd === "/dream") { const conv = transcript.filter((m) => m.role === "user" || m.role === "nexus").slice(-16); if (!conv.length) { transcript.push({ role: "system", text: "nothing to consolidate yet — have a conversation first" }); render(); return; } transcript.push({ role: "user", text: "/dream" }); const block = { role: "nexus", items: [] }; transcript.push(block); scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Dreaming"; ctl = makeCtl(); const card = { type: "tool", id: "dr", name: "Task", label: "Task(consolidate memory)", status: "run", start: Date.now() }; block.items.push(card); startTick(); render(); (async () => {
@@ -2210,6 +2253,7 @@ function usage() {
 
   ${bold("COMMANDS")}
     init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
+    docs [topic]                      built-in Nexus documentation (docs all for everything)
     nexus [opts] [task]               Nexus AI coder chat: -e claude|ollama|opencode, -y skip prompts, --print headless
     nexus run "<goal>" [opts]         autonomous multi-level runner: -e engine, --overnight, --until, --resume
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
