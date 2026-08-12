@@ -792,20 +792,20 @@ async function cli(args) {
     else { try { const fs = require("fs"), path = require("path"); const raw = fs.readFileSync(path.join(process.cwd(), ".nexus", "audit.jsonl"), "utf8").trim().split("\n").filter(Boolean); const show = (rest[0] === "--json") ? raw.slice(-50).join("\n") : raw.slice(-20).map((l) => { try { const e = JSON.parse(l); return "  " + gray((e.ts || "").slice(0, 19).replace("T", " ")) + " " + (e.status === "blocked" ? red("blocked") : e.status === "error" ? yellow("error  ") : green("ok     ")) + " " + (e.tool || "") + gray(" " + (e.path || e.cmd || "") + (e.reason ? " — " + e.reason : "")); } catch (_) { return ""; } }).filter(Boolean).join("\n"); const v = auditVerify(process.cwd()); console.log(show + "\n  " + (v.ok ? green("chain verified (" + v.count + ")") : red("CHAIN BROKEN — sentinel audit verify"))); } catch (_) { console.log("  " + gray("no audit trail (.nexus/audit.jsonl) in this directory")); } }
   }
   else if (cmd === "doctor") {
+    const reach = await ollamaReachable(), auth = nexusAuth(), warns = policyWarnings(process.cwd()), v = auditVerify(process.cwd());
+    const health = { engines: Object.fromEntries(ENGINE_ORDER.map((e) => [e, engineAvail(e)])), ollamaReachable: reach, signedIn: !!auth, account: auth ? (auth.name || auth.email || auth.uid) : null, policyValid: warns.length === 0, policyWarnings: warns, audit: v.empty ? "empty" : v.ok ? "intact" : "tampered", auditCount: v.count || 0 };
+    const problem = warns.length || (v.ok === false);
+    health.healthy = !problem;
+    if (rest[0] === "--json") { console.log(JSON.stringify(health, null, 2)); process.exit(problem ? 1 : 0); }
     banner(); h1("Nexus doctor");
     console.log("  " + bold("AI engines") + gray("  (● installed)"));
     for (const e of ENGINE_ORDER) console.log("    " + (engineAvail(e) ? green("●") : gray("○")) + " " + e.padEnd(9) + gray(ENGINES[e].label));
-    const reach = await ollamaReachable();
     console.log("    " + (reach ? green("●") : yellow("○")) + " " + "ollama".padEnd(9) + gray(reach ? "server reachable" : "server not reachable — start Ollama or run `sentinel nexus setup`"));
-    const auth = nexusAuth();
-    console.log("\n  " + bold("Account") + "  " + (auth ? green("signed in ") + gray("as " + (auth.name || auth.email || auth.uid)) : gray("not signed in — `sentinel login`")));
-    const warns = policyWarnings(process.cwd());
+    console.log("\n  " + bold("Account") + "  " + (auth ? green("signed in ") + gray("as " + health.account) : gray("not signed in — `sentinel login`")));
     console.log("\n  " + bold("Security policy") + "  " + (warns.length ? yellow(warns.length + " warning(s)") : green("valid")));
     warns.forEach((w) => console.log("    " + yellow("• " + w)));
-    const v = auditVerify(process.cwd());
     console.log("\n  " + bold("Audit trail") + "  " + (v.empty ? gray("empty (no enforced actions yet)") : v.ok ? green("intact") + gray(" — " + v.count + " records, hash chain verified") : red("TAMPERED") + " — " + v.reason));
-    const problem = warns.length || (v.ok === false);
-    console.log("\n  " + (problem ? yellow("some checks need attention") : green("all systems healthy")) + "\n");
+    console.log("\n  " + (problem ? yellow("some checks need attention") : green("all systems healthy")) + gray("   (machine-readable: sentinel doctor --json)") + "\n");
     process.exit(problem ? 1 : 0);
   }
   else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {

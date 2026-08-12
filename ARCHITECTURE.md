@@ -22,8 +22,9 @@ lib/
   settings.js          data-driven schema behind the /settings panel
   ollama.js            local-model client (chat, tags, coder-model pick)
   validate.js          .nexus/policy.json + team.json config validation
+  text.js              pure text helpers (oneline, extractJson)
 test/
-  run.js               framework-free unit suite (npm test) — 114 assertions
+  run.js               framework-free unit suite (npm test) — 128 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
