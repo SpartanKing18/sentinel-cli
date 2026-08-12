@@ -23,6 +23,7 @@ const { defang, refang } = require("../lib/ioc");
 const { shannon, assess } = require("../lib/entropy");
 const { convert: epochConvert } = require("../lib/epoch");
 const { parseUrl } = require("../lib/urlparse");
+const { base32encode, base32decode } = require("../lib/base32");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -344,6 +345,19 @@ group("URL parser tool");
   ok("scheme-less host:port defaults to http", s.scheme === "http" && s.host === "example.com" && s.port === "8080" && s.params.q === "test");
   ok("plain domain", parseUrl("evil.com").host === "evil.com" && parseUrl("evil.com").scheme === "http");
   ok("empty / garbage → null", parseUrl("") === null && parseUrl("http://") === null);
+}
+
+group("base32 (RFC 4648 test vectors)");
+{
+  ok("empty", base32encode("") === "");
+  ok("'f' → MY======", base32encode("f") === "MY======");
+  ok("'fo' → MZXQ====", base32encode("fo") === "MZXQ====");
+  ok("'foo' → MZXW6===", base32encode("foo") === "MZXW6===");
+  ok("'foobar' → MZXW6YTBOI======", base32encode("foobar") === "MZXW6YTBOI======");
+  ok("decode reverses (padded)", base32decode("MZXW6YTBOI======") === "foobar");
+  ok("decode lowercase + spaces tolerated", base32decode("mzxw6===") === "foo");
+  ok("round-trips arbitrary text", base32decode(base32encode("Sentinel/Nexus 42!")) === "Sentinel/Nexus 42!");
+  ok("invalid char → null", base32decode("MZXW6!!!") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

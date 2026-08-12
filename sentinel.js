@@ -30,6 +30,7 @@ const { defang, refang } = require("./lib/ioc"); // IOC defang/refang tool (lib/
 const { assess: entropyAssess } = require("./lib/entropy"); // Shannon entropy tool (lib/entropy.js)
 const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter (lib/epoch.js)
 const { parseUrl } = require("./lib/urlparse"); // URL breakdown tool (lib/urlparse.js)
+const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -143,6 +144,8 @@ const ENC = {
   hexd: (s) => Buffer.from(s, "hex").toString("utf8"),
   urle: (s) => encodeURIComponent(s),
   urld: (s) => decodeURIComponent(s),
+  base32e: (s) => base32encode(s),
+  base32d: (s) => { const r = base32decode(s); return r == null ? "(invalid base32)" : r; },
 };
 function hashes(s) { return ["md5", "sha1", "sha256", "sha512"].map((a) => "  " + a.padEnd(8) + cyan(crypto.createHash(a).update(s).digest("hex"))).join("\n"); }
 
@@ -695,7 +698,7 @@ async function cli(args) {
     else console.log("git clone|push|pull|status|log|diff|branch|checkout|repos|new|issues|prs|issue|pr|comment|gists|gist  (token: SENTINEL_GH_TOKEN)");
   }
   else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log((SHELLS[lang] || SHELLS.bash)(ip, port)); }
-  else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url)"); }
+  else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
   else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
   else if (cmd === "url") { const u = parseUrl(rest.join(" ")); if (!u) { console.log(red("usage: sentinel url <url>   e.g. sentinel url https://host.com:8443/a?x=1#f")); } else { h1("URL"); const row = (k, v) => { if (v !== "" && v != null) console.log("  " + k.padEnd(10) + cyan(v)); }; row("scheme", u.scheme); row("host", u.host); row("port", u.port); row("path", u.path); row("fragment", u.fragment); if (u.username) row("user", u.username); if (u.password) row("pass", u.password); const keys = Object.keys(u.params); if (keys.length) { console.log("  " + gray("query params:")); keys.forEach((k) => console.log("    " + k.padEnd(14) + cyan(u.params[k]))); } console.log(); } }
@@ -2723,14 +2726,14 @@ function usage() {
     git gists                         list your gists
     git gist <file> [description]     create a gist from a file
     revshell <lang> <ip> <port>       reverse-shell one-liner
-    encode <b64|hex|url> <text>       encode text
+    encode <b64|hex|url|base32> <text> encode text
     defang <ioc>                      neutralize a URL/IP/email for safe pasting (hxxp, [.])
     refang <text>                     reverse defang
     entropy <string>                  Shannon entropy — flag high-entropy secrets/keys
     epoch [ts|date]                   unix timestamp <-> ISO/UTC (no arg = now)
     incidr <ip> <cidr>                is an IP inside a CIDR range? (firewall/allowlist checks)
     url <url>                         break a URL into scheme/host/port/path/query/fragment
-    decode <b64|hex|url> <text>       decode text
+    decode <b64|hex|url|base32> <text> decode text
     hash <text>                       md5 / sha1 / sha256 / sha512
     hashid <hash>                     identify a hash type
     genpass [length]                  generate a strong random password (default 20)
