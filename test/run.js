@@ -25,6 +25,7 @@ const { convert: epochConvert } = require("../lib/epoch");
 const { parseUrl } = require("../lib/urlparse");
 const { base32encode, base32decode } = require("../lib/base32");
 const { hotp, totp, secondsRemaining } = require("../lib/totp");
+const { decodeJwt, analyzeJwt } = require("../lib/jwt");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -374,6 +375,24 @@ group("TOTP / HOTP (RFC 4226 / 6238 test vectors)");
   ok("TOTP 6-digit at T=59 → 287082", totp(secret, { time: 59 }) === "287082");
   ok("TOTP invalid secret → null", totp("not base32!!!") === null && totp("") === null);
   ok("secondsRemaining within a 30s step", secondsRemaining(30, 59) === 1 && secondsRemaining(30, 45) === 15);
+}
+
+group("JWT decode + analysis");
+{
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  const mk = (h, p) => b64u(h) + "." + b64u(p) + ".sig";
+  const expired = mk({ alg: "HS256", typ: "JWT" }, { sub: "user1", exp: 1000000000 }); // exp = 2001
+  const a1 = analyzeJwt(expired, 2000000000);
+  ok("decodes header + payload", a1.header.alg === "HS256" && a1.payload.sub === "user1");
+  ok("flags expired token", a1.expired === true && a1.state === "expired");
+  const valid = mk({ alg: "HS256" }, { exp: 3000000000 });
+  ok("valid (unexpired) token", analyzeJwt(valid, 1000000000).expired === false && analyzeJwt(valid, 1000000000).state === "valid");
+  const nbf = mk({ alg: "HS256" }, { nbf: 5000000000 });
+  ok("not-yet-valid (nbf future)", analyzeJwt(nbf, 1000000000).notYetValid === true);
+  const none = mk({ alg: "none" }, { sub: "x" });
+  ok("warns on alg=none", analyzeJwt(none).alg === "none" && analyzeJwt(none).warnings.some((w) => /alg=none/.test(w)));
+  ok("no-exp token → state no-exp", analyzeJwt(mk({ alg: "HS256" }, { sub: "x" })).state === "no-exp");
+  ok("garbage → null", analyzeJwt("not.a.jwt.x") === null && analyzeJwt("only-one-part") === null && decodeJwt("") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

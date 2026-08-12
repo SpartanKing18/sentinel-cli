@@ -32,6 +32,7 @@ const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter
 const { parseUrl } = require("./lib/urlparse"); // URL breakdown tool (lib/urlparse.js)
 const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
+const { analyzeJwt } = require("./lib/jwt"); // JWT decode + expiry/alg analysis (lib/jwt.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -611,10 +612,18 @@ function cidr(input) {
   console.log("  Hosts      " + green(String(c.hosts)));
 }
 function jwtDecode(tok) {
-  const p = String(tok || "").trim().split("."); if (p.length < 2) { console.log(red("not a JWT")); return; }
-  const dec = (x) => JSON.stringify(JSON.parse(Buffer.from(x.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()), null, 2);
-  try { h1("JWT"); console.log(gray("// header")); console.log(dec(p[0])); console.log(gray("\n// payload")); console.log(dec(p[1])); console.log(gray("\nsignature: ") + p[2] || ""); }
-  catch (e) { console.log(red("invalid JWT: " + e.message)); }
+  const a = analyzeJwt(tok);
+  if (!a) { console.log(red("not a valid JWT (expected header.payload[.signature])")); return; }
+  h1("JWT");
+  console.log(gray("// header")); console.log(JSON.stringify(a.header, null, 2));
+  console.log(gray("\n// payload")); console.log(JSON.stringify(a.payload, null, 2));
+  const humanT = (t) => { const c = epochConvert(String(t)); return c ? c.iso.replace(/\.000Z$/, "Z") : String(t); };
+  const times = []; if (a.iat != null) times.push("iat " + humanT(a.iat)); if (a.nbf != null) times.push("nbf " + humanT(a.nbf)); if (a.exp != null) times.push("exp " + humanT(a.exp));
+  if (times.length) console.log(gray("\n// times: ") + times.join(gray("  ·  ")));
+  const sc = (a.state === "expired" || a.state === "not-yet-valid") ? red : a.state === "valid" ? green : gray;
+  console.log("\n  status: " + sc(a.state.toUpperCase()) + gray("   (signature NOT verified — no key)"));
+  for (const w of a.warnings) console.log("  " + yellow("warning: " + w));
+  if (a.signature) console.log(gray("\nsignature: ") + a.signature);
 }
 async function ipInfo(ip) {
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
