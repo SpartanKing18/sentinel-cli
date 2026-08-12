@@ -41,8 +41,9 @@ lib/
   httpstatus.js        HTTP status-code map + classification (pure lookup)
   dorks.js             google-dork catalog + URL builder (pure, tested)
   payloads.js          attack-payload library by vuln class (pure data, tested)
+  cheats.js            command cheat-sheets by topic (pure data, tested)
 test/
-  run.js               framework-free unit suite (npm test) — 272 assertions
+  run.js               framework-free unit suite (npm test) — 276 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

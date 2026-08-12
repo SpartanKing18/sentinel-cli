@@ -424,6 +424,15 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("cheat-sheets");
+{
+  const { CHEATS, cheatTopics } = require("../lib/cheats");
+  eq("expected topics present", cheatTopics().sort(), ["cracking", "nmap", "privesc", "shells", "transfer", "web", "windows"]);
+  ok("every topic has a non-empty string-array", cheatTopics().every((t) => Array.isArray(CHEATS[t]) && CHEATS[t].length > 0 && CHEATS[t].every((l) => typeof l === "string" && l.length)));
+  ok("nmap cheats mention nmap", CHEATS.nmap.every((l) => l.includes("nmap")));
+  ok("privesc includes the SUID find", CHEATS.privesc.some((l) => l.includes("-perm -4000")));
+}
+
 group("payload library");
 {
   const { PAYLOADS_CLI, payloadClasses } = require("../lib/payloads");
