@@ -201,5 +201,26 @@ group("config validation (.nexus/policy.json + team.json)");
   ok("team bad maxRounds", validateTeam({ maxRounds: 0 }).some((s) => />= 1/.test(s)));
 }
 
+group("edge cases");
+{
+  // mergeMemory: appends under an existing section rather than duplicating the header
+  const r = mergeMemory("# P\n\n## Remembered\n- Existing rule\n", "A brand new rule");
+  ok("remember reuses existing section", (r.md.match(/## Remembered/g) || []).length === 1 && /A brand new rule/.test(r.md));
+  // maskSecrets: multiple secrets in one blob
+  const masked = maskSecrets("aws AKIA" + "ABCDEFGHIJKLMNOP" + " gh ghp_" + "z".repeat(36) + " goog AIza" + "y".repeat(35));
+  ok("masks several secret types at once", masked.includes("[redacted:aws-key]") && masked.includes("[redacted:github-token]") && masked.includes("[redacted:google-key]"));
+  // globToRe: leading-dot files and single-char wildcard
+  ok("globToRe .env.* matches .env.prod", globToRe(".env.*").test(".env.prod"));
+  ok("globToRe ? single char", globToRe("id_rsa?").test("id_rsa1") && !globToRe("id_rsa?").test("id_rsaXY"));
+  // priceOf: case-insensitive
+  ok("priceOf OPUS (caps)", priceOf("OPUS").out === 75);
+  // describe: tolerates a sparse/empty state without throwing
+  ok("settings describe empty state", describe({}).length === 6 && describe({}).every((g) => g.rows.length > 0));
+  // codexParse: multiple agent messages -> last wins
+  ok("codex takes the latest message", codexParse([JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "first" } }), JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "final answer" } })].join("\n")).text === "final answer");
+  // discoverTools: case-insensitive keyword
+  ok("discover is case-insensitive", discoverTools("HTTP", TOOL_CATALOG).some((t) => t.name === "http_fetch"));
+}
+
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
 process.exit(fail ? 1 : 0);
