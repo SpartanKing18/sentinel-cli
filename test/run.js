@@ -17,6 +17,7 @@ const { pickCoderModel } = require("../lib/ollama");
 const { validatePolicy, validateTeam } = require("../lib/validate");
 const { oneline, extractJson } = require("../lib/text");
 const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
+const { TOP_PORTS, parsePorts, idHash, parseCve } = require("../lib/scanutil");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -251,6 +252,21 @@ group("render helpers (frameDiff + wordHi) — the trickiest pure algorithms");
   ok("wordHi preserves the visible text", strip(m1) === "const total = 22;" && strip(p1) === "const total = 12;");
   ok("wordHi with color off returns plain", JSON.stringify(wordHi("a x", "a y", false)) === JSON.stringify(["a x", "a y"]));
   ok("diffTokens splits words/space/punct", JSON.stringify(diffTokens("a=1")) === JSON.stringify(["a", "=", "1"]));
+}
+
+group("security console core (scan/hash/cve)");
+{
+  ok("parsePorts top → TOP_PORTS", parsePorts("top") === TOP_PORTS && parsePorts("") === TOP_PORTS);
+  ok("parsePorts range 20-25", JSON.stringify(parsePorts("20-25")) === JSON.stringify([20, 21, 22, 23, 24, 25]));
+  ok("parsePorts list 80,443,8080", JSON.stringify(parsePorts("80,443,8080")) === JSON.stringify([80, 443, 8080]));
+  ok("parsePorts drops out-of-range", JSON.stringify(parsePorts("0,80,70000,-1,443")) === JSON.stringify([80, 443]));
+  ok("idHash MD5/NTLM (32 hex)", idHash("5f4dcc3b5aa765d61d8327deb882cf99").startsWith("MD5"));
+  ok("idHash SHA-1 (40 hex)", idHash("a".repeat(40)).startsWith("SHA-1"));
+  ok("idHash SHA-256 (64 hex)", idHash("a".repeat(64)).startsWith("SHA-256"));
+  ok("idHash bcrypt", idHash("$2y$10$abcdefghijklmnopqrstuv") === "bcrypt");
+  ok("idHash unknown", idHash("hello") === "unknown");
+  const cve = parseCve({ cve: { id: "CVE-2021-44228", published: "2021-12-10T10:15:09.143", descriptions: [{ lang: "en", value: "Log4Shell RCE" }], metrics: { cvssMetricV31: [{ cvssData: { baseScore: 10, baseSeverity: "CRITICAL" } }] } } });
+  ok("parseCve extracts id/desc/score/sev/date", cve.id === "CVE-2021-44228" && cve.desc === "Log4Shell RCE" && cve.score === 10 && cve.sev === "CRITICAL" && cve.published === "2021-12-10");
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
