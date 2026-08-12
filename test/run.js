@@ -424,6 +424,25 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("help reference (single source of truth)");
+{
+  const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("../lib/reference");
+  ok("8 command groups, non-empty", COMMAND_GROUPS.length === 8 && COMMAND_GROUPS.every((g) => g.title && g.rows.length));
+  ok("every row is [left, right] strings", COMMAND_GROUPS.every((g) => g.rows.every((r) => r.length === 2 && typeof r[0] === "string" && typeof r[1] === "string")));
+  // DRIFT GUARD: every documented command verb must have a real dispatch handler.
+  const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
+  const dispatched = new Set();
+  for (const m of src.matchAll(/cmd === "([^"]+)"/g)) dispatched.add(m[1]);
+  const undocumentedDrift = [...documentedVerbs()].filter((v) => !dispatched.has(v));
+  eq("no documented command lacks a handler", undocumentedDrift, []);
+  // renderer: column math + dynamic cheats substitution + title coloring
+  const txt = renderCommands(COMMAND_GROUPS, { color: (s) => "[" + s + "]", cheats: "aa, bb" });
+  ok("renderCommands colors titles", txt.includes("    [AI & Nexus]") && txt.includes("    [Reference]"));
+  ok("renderCommands substitutes __CHEATS__", txt.includes("aa, bb") && !txt.includes("__CHEATS__"));
+  ok("summary column aligned (>=2 spaces, min col 34)", renderCommands([{ title: "T", rows: [["scan <host>", "x"]] }]).endsWith("scan <host>".padEnd(34) + "x"));
+  ok("long left cell keeps 2-space gap", renderCommands([{ title: "T", rows: [["encode <b64|hex|url|base32> <text>", "y"]] }]).endsWith("encode <b64|hex|url|base32> <text>  y"));
+}
+
 group("diceware passphrase");
 {
   const { WORDS, genPassphrase, passphraseBits } = require("../lib/passphrase");
