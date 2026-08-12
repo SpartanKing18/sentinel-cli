@@ -28,14 +28,13 @@ const { frameDiff, wordHi } = require("./lib/diff"); // terminal render helpers 
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 const { CMD_MAP } = require("./lib/registry"); // data-driven command registry (lib/registry.js)
 const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter (lib/epoch.js)
-const { parseUrl } = require("./lib/urlparse"); // URL breakdown tool (lib/urlparse.js)
 const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
 const { analyzeJwt } = require("./lib/jwt"); // JWT decode + expiry/alg analysis (lib/jwt.js)
 const { parseUA } = require("./lib/useragent"); // User-Agent parser (lib/useragent.js)
 
 // ---------- data ----------
-const { SERVICES, portLookup } = require("./lib/ports"); // port<->service map + lookup (lib/ports.js)
+const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
 const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
 const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
 const { parsePorts, idHash, parseCve, cidrCalc } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
@@ -690,10 +689,8 @@ async function cli(args) {
   else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log(revshell(lang, ip, port)); }
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
-  else if (cmd === "port") { const r = portLookup(rest[0]); if (!r) { console.log(red("usage: sentinel port <number|service>   e.g. sentinel port 3306  ·  sentinel port redis")); } else if (r.kind === "port") { console.log("  " + bold(cyan(String(r.port))) + "  " + (r.service ? r.service : gray("no well-known service"))); } else { if (!r.ports.length) console.log("  " + gray("no well-known port matches ") + r.name); else r.ports.forEach((p) => console.log("  " + bold(cyan(String(p))).padEnd(20) + SERVICES[p])); } }
   else if (cmd === "useragent" || cmd === "ua") { const u = parseUA(rest.join(" ")); if (!u) { console.log(red("usage: sentinel useragent <ua-string>   — parse browser/OS/device")); } else { h1("User-Agent"); const row = (k, v) => console.log("  " + k.padEnd(9) + v); row("browser", cyan(u.browser + (u.version ? " " + u.version : ""))); row("os", cyan(u.os)); row("device", u.device); row("bot", u.bot ? yellow("yes") : "no"); console.log(); } }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
-  else if (cmd === "url") { const u = parseUrl(rest.join(" ")); if (!u) { console.log(red("usage: sentinel url <url>   e.g. sentinel url https://host.com:8443/a?x=1#f")); } else { h1("URL"); const row = (k, v) => { if (v !== "" && v != null) console.log("  " + k.padEnd(10) + cyan(v)); }; row("scheme", u.scheme); row("host", u.host); row("port", u.port); row("path", u.path); row("fragment", u.fragment); if (u.username) row("user", u.username); if (u.password) row("pass", u.password); const keys = Object.keys(u.params); if (keys.length) { console.log("  " + gray("query params:")); keys.forEach((k) => console.log("    " + k.padEnd(14) + cyan(u.params[k]))); } console.log(); } }
   else if (cmd === "epoch" || cmd === "time" || cmd === "ts") { const t = rest.join(" ").trim() || String(Math.floor(Date.now() / 1000)); const c = epochConvert(t); if (!c) { console.log(red("usage: sentinel epoch <unix-ts | ISO date>   (no arg = now)")); } else { h1("timestamp  (" + c.from + ")"); console.log("  epoch (s)   " + cyan(String(c.epochSeconds))); console.log("  epoch (ms)  " + String(c.epochMs)); console.log("  ISO 8601    " + cyan(c.iso)); console.log("  UTC         " + c.utc + "\n"); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "lab") { if (rest[0]) labOne(rest[0]); else labList(); }
