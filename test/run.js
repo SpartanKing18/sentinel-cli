@@ -9,6 +9,8 @@ const { ENGINES, ENGINE_ORDER, engineCap } = require("../lib/engines");
 const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("../lib/security");
 const { styleNames, styleDirective } = require("../lib/styles");
 const { mergeMemory } = require("../lib/memory");
+const { STYLES, allStyles, loadStyles } = require("../lib/styles");
+const { TOOL_CATALOG, discoverTools } = require("../lib/tools");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -110,6 +112,30 @@ group("agent memory / remember (Glitch idea) — dedup");
   ok("rejects too-short", mergeMemory("", "ok").added === false);
   const r4 = mergeMemory(r.md, "Always run npm test before pushing");
   ok("adds a distinct fact", r4.added === true && /npm test/.test(r4.md));
+}
+
+group("custom output styles (.nexus/styles/*.md)");
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "styles-"));
+  fs.writeFileSync(path.join(dir, "pirate.md"), "# Pirate\nRespond in the voice of a pirate, but keep the code correct.");
+  fs.writeFileSync(path.join(dir, "concise.md"), "Override: one sentence max."); // custom overrides built-in
+  const loaded = loadStyles(dir);
+  ok("loads custom style from md", loaded.pirate.startsWith("Respond in the voice"));
+  ok("strips the leading heading", !loaded.pirate.startsWith("#"));
+  const all = allStyles(dir);
+  ok("merges built-ins + custom", all.review === STYLES.review && all.pirate);
+  ok("custom overrides built-in", all.concise === "Override: one sentence max.");
+  ok("missing dir → just built-ins", Object.keys(allStyles(path.join(dir, "nope"))).length === Object.keys(STYLES).length);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+group("discover tool (Glitch idea)");
+{
+  const r = discoverTools("search files", TOOL_CATALOG).map((t) => t.name);
+  ok("query matches search + find", r.includes("search") && r.includes("find"));
+  ok("query 'http' finds http_fetch", discoverTools("http", TOOL_CATALOG).some((t) => t.name === "http_fetch"));
+  ok("empty query → all tools", discoverTools("", TOOL_CATALOG).length === TOOL_CATALOG.length);
+  ok("no match → empty", discoverTools("zzzznomatch", TOOL_CATALOG).length === 0);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

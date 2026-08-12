@@ -15,8 +15,11 @@ lib/
   parsers.js           Gemini/Codex structured-output parsers (real token counts)
   policy.js            guardrails engine: policyCheck + tamper-evident audit chain
   security.js          scanSecrets / maskSecrets / classifyDanger / compactOutput
+  styles.js            output styles (built-in + custom .nexus/styles/*.md)
+  memory.js            durable-note merge with dedup (the agent `remember` tool)
+  tools.js             local-agent tool catalog + `discover` keyword search
 test/
-  run.js               framework-free unit suite (npm test) — 64 assertions
+  run.js               framework-free unit suite (npm test) — 82 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
