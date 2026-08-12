@@ -2785,7 +2785,16 @@ function usage() {
 // ---------- entry ----------
 process.on("SIGINT", () => { if (tuiActive) return; console.log("\n  " + gray("interrupted — stay sharp.") + "\n"); process.exit(130); });
 const args = process.argv.slice(2);
-if (args[0] === "-v" || args[0] === "--version") { console.log("sentinel " + VERSION); process.exit(0); }
+if (args[0] === "-v" || args[0] === "--version") {
+  console.log("sentinel " + VERSION); // first line stays machine-parseable
+  if (!args.includes("--short")) {
+    console.log(gray("  node " + process.version + " · " + process.platform + "/" + process.arch));
+    const inst = ENGINE_ORDER.filter((e) => e !== "ollama" && engineAvail(e));
+    if (engineAvail("ollama")) inst.push("ollama (local)");
+    console.log(gray("  AI engines: " + (inst.length ? inst.join(", ") : "none installed")));
+  }
+  process.exit(0);
+}
 else if (args.length === 0) mainMenu();
 else if (args[0] === "-h" || args[0] === "--help") usage();
 else cli(args).then(() => process.exit(0)).catch((e) => { console.error("  " + red("error: " + e.message)); process.exit(1); });
