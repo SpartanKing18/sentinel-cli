@@ -424,6 +424,17 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("http status reference");
+{
+  const { HTTP_STATUS_MAP, statusClass, statusInfo } = require("../lib/httpstatus");
+  ok("map covers common codes", HTTP_STATUS_MAP["200"] === "OK" && HTTP_STATUS_MAP["404"] === "Not Found" && HTTP_STATUS_MAP["503"] === "Service Unavailable");
+  eq("statusInfo 200", statusInfo("200"), { code: "200", text: "OK", class: "2xx success" });
+  eq("statusInfo 418", statusInfo(418), { code: "418", text: "I'm a teapot", class: "4xx client error" });
+  eq("statusInfo trims whitespace", statusInfo("  404 "), { code: "404", text: "Not Found", class: "4xx client error" });
+  ok("statusInfo unknown/empty → null", statusInfo("999") === null && statusInfo("") === null && statusInfo("abc") === null && statusInfo(null) === null);
+  ok("statusClass boundaries", statusClass(199) === "1xx informational" && statusClass(200) === "2xx success" && statusClass(399) === "3xx redirect" && statusClass(500) === "5xx server error" && statusClass(600) === "");
+}
+
 group("reverse-shell payloads");
 {
   const { SHELLS, revshell, shellLangs } = require("../lib/revshell");
