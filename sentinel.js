@@ -985,27 +985,7 @@ async function nexusSetup(opts) {
 }
 
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
-function ollamaChat(model, messages, format, signal) {
-  return new Promise((resolve, reject) => {
-    const HOST = process.env.OLLAMA_HOST || "127.0.0.1", PORT = +(process.env.OLLAMA_PORT || 11434);
-    const body = JSON.stringify({ model, stream: false, format, keep_alive: "30m", options: { temperature: 0.2, num_ctx: 16384 }, messages });
-    const req = http.request({ host: HOST, port: PORT, path: "/api/chat", method: "POST", signal, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
-      (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { try { resolve(JSON.parse(d).message.content || ""); } catch (e) { reject(new Error("bad model response")); } }); });
-    req.setTimeout(+(process.env.OLLAMA_TIMEOUT || 300000), () => { req.destroy(new Error("Ollama timed out (no response) — is the model stuck loading?")); }); // prevent a wedged request from hanging the turn forever
-    req.on("error", (e) => reject(new Error("cannot reach Ollama at " + HOST + ":" + PORT + " — is it running? (" + e.message + ")"))); req.write(body); req.end();
-  });
-}
-function ollamaTags() {
-  return new Promise((resolve) => {
-    const HOST = process.env.OLLAMA_HOST || "127.0.0.1", PORT = +(process.env.OLLAMA_PORT || 11434);
-    http.get({ host: HOST, port: PORT, path: "/api/tags" }, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => { try { resolve((JSON.parse(d).models || []).map((m) => m.name)); } catch (_) { resolve([]); } }); }).on("error", () => resolve([]));
-  });
-}
-function pickCoderModel(ms) {
-  const pri = ["qwen2.5-coder", "deepseek-coder", "codellama", "hermes3", "dolphin3", "llama3.1"];
-  for (const p of pri) { const hit = ms.find((m) => m.toLowerCase().startsWith(p)); if (hit) return hit; }
-  return ms.find((m) => /coder|code/i.test(m)) || ms[0] || "";
-}
+const { ollamaChat, ollamaTags, pickCoderModel } = require("./lib/ollama"); // local-model client (lib/ollama.js)
 const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
 function coderShell(command, cwd) {
   return new Promise((resolve) => {

@@ -13,6 +13,7 @@ const { STYLES, allStyles, loadStyles } = require("../lib/styles");
 const { TOOL_CATALOG, discoverTools } = require("../lib/tools");
 const { createBgJobs, MAX_BUF } = require("../lib/bgjobs");
 const { SETTINGS, describe } = require("../lib/settings");
+const { pickCoderModel } = require("../lib/ollama");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -171,6 +172,15 @@ group("settings schema (data-driven /settings panel)");
   ok("budget rendered", flat["Budget cap"] === "$5.00");
   ok("policy org-enforced", flat["Security policy"] === "org-enforced");
   ok("every row has a cmd", d.every((g) => g.rows.every((r) => r.cmd && r.cmd.length)));
+}
+
+group("ollama coder-model selection");
+{
+  ok("prefers qwen2.5-coder", pickCoderModel(["llama3.2:3b", "qwen2.5-coder:7b", "mistral"]) === "qwen2.5-coder:7b");
+  ok("priority order (deepseek over codellama)", pickCoderModel(["codellama:7b", "deepseek-coder:6.7b"]) === "deepseek-coder:6.7b");
+  ok("falls back to code-ish", pickCoderModel(["mystery-code-model", "random"]) === "mystery-code-model");
+  ok("falls back to first", pickCoderModel(["random1", "random2"]) === "random1");
+  ok("empty → empty string", pickCoderModel([]) === "");
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
