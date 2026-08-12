@@ -424,5 +424,19 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("diceware passphrase");
+{
+  const { WORDS, genPassphrase, passphraseBits } = require("../lib/passphrase");
+  ok("wordlist non-trivial + unique + clean", WORDS.length >= 200 && new Set(WORDS).size === WORDS.length && WORDS.every((w) => /^[a-z]+$/.test(w)));
+  // deterministic via injected rng: a fake that returns fixed indices
+  const fake = (() => { let i = 0; const seq = [0, 1, 2, 3]; return () => seq[i++ % seq.length]; })();
+  eq("genPassphrase deterministic with injected rng", genPassphrase(4, fake), [WORDS[0], WORDS[1], WORDS[2], WORDS[3]].join("-"));
+  ok("word count honored", genPassphrase(6, () => 0).split("-").length === 6);
+  ok("default is 4 words", genPassphrase(undefined, () => 0).split("-").length === 4);
+  ok("all words come from the list", genPassphrase(8).split("-").every((w) => WORDS.includes(w)));
+  ok("count clamped to sane bounds", genPassphrase(0, () => 0).split("-").length === 4 && genPassphrase(999, () => 0).split("-").length === 32);
+  ok("entropy bits scale with words", passphraseBits(4) === Math.round(4 * Math.log2(WORDS.length)) && passphraseBits(6) > passphraseBits(4));
+}
+
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
 process.exit(fail ? 1 : 0);

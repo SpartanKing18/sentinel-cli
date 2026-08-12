@@ -35,8 +35,9 @@ lib/
   jwt.js               JWT decode + expiry/alg-none analysis
   useragent.js         User-Agent parser (browser/OS/device/bot)
   ports.js             port <-> service map + bidirectional lookup
+  passphrase.js        diceware memorable-passphrase generator (injectable rng)
 test/
-  run.js               framework-free unit suite (npm test) — 235 assertions
+  run.js               framework-free unit suite (npm test) — 242 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

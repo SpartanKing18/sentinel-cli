@@ -37,6 +37,7 @@ const { parseUA } = require("./lib/useragent"); // User-Agent parser (lib/userag
 
 // ---------- data ----------
 const { SERVICES, portLookup } = require("./lib/ports"); // port<->service map + lookup (lib/ports.js)
+const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
 const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, inCidr } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const SHELLS = {
@@ -712,6 +713,7 @@ async function cli(args) {
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
   else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
+  else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
   else if (cmd === "port") { const r = portLookup(rest[0]); if (!r) { console.log(red("usage: sentinel port <number|service>   e.g. sentinel port 3306  ·  sentinel port redis")); } else if (r.kind === "port") { console.log("  " + bold(cyan(String(r.port))) + "  " + (r.service ? r.service : gray("no well-known service"))); } else { if (!r.ports.length) console.log("  " + gray("no well-known port matches ") + r.name); else r.ports.forEach((p) => console.log("  " + bold(cyan(String(p))).padEnd(20) + SERVICES[p])); } }
   else if (cmd === "useragent" || cmd === "ua") { const u = parseUA(rest.join(" ")); if (!u) { console.log(red("usage: sentinel useragent <ua-string>   — parse browser/OS/device")); } else { h1("User-Agent"); const row = (k, v) => console.log("  " + k.padEnd(9) + v); row("browser", cyan(u.browser + (u.version ? " " + u.version : ""))); row("os", cyan(u.os)); row("device", u.device); row("bot", u.bot ? yellow("yes") : "no"); console.log(); } }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
@@ -2751,6 +2753,7 @@ function usage() {
     epoch [ts|date]                   unix timestamp <-> ISO/UTC (no arg = now)
     incidr <ip> <cidr>                is an IP inside a CIDR range? (firewall/allowlist checks)
     port <number|service>             port <-> service lookup (both directions)
+    passphrase [count]                memorable diceware passphrase (default 4 words)
     url <url>                         break a URL into scheme/host/port/path/query/fragment
     totp <base32-secret>              generate a 2FA (TOTP) code from a secret
     useragent <ua-string>             parse a User-Agent (browser / OS / device / bot)
