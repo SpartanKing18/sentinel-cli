@@ -55,6 +55,7 @@ group("engines (registry + NO cross-engine flag leakage)");
   ok("engineCap claude.effort", engineCap("claude", "effort") === true);
   ok("engineCap gemini.effort false", engineCap("gemini", "effort") === false);
   ok("6 engines registered", ENGINE_ORDER.length === 6);
+  ok("every engine has an install command", ENGINE_ORDER.every((e) => typeof ENGINES[e].install === "string" && ENGINES[e].install.length > 5));
 }
 
 group("policy (guardrails)");

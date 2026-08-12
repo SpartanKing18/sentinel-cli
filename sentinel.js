@@ -800,7 +800,7 @@ async function cli(args) {
     if (rest[0] === "--json") { console.log(JSON.stringify(health, null, 2)); process.exit(problem ? 1 : 0); }
     banner(); h1("Nexus doctor");
     console.log("  " + bold("AI engines") + gray("  (● installed)"));
-    for (const e of ENGINE_ORDER) console.log("    " + (engineAvail(e) ? green("●") : gray("○")) + " " + e.padEnd(9) + gray(ENGINES[e].label));
+    for (const e of ENGINE_ORDER) { const on = engineAvail(e); console.log("    " + (on ? green("●") : gray("○")) + " " + e.padEnd(9) + gray(ENGINES[e].label) + (!on && ENGINES[e].install ? gray("  — install: ") + cyan(ENGINES[e].install) : "")); }
     console.log("    " + (reach ? green("●") : yellow("○")) + " " + "ollama".padEnd(9) + gray(reach ? "server reachable" : "server not reachable — start Ollama or run `sentinel nexus setup`"));
     console.log("\n  " + bold("Account") + "  " + (auth ? green("signed in ") + gray("as " + health.account) : gray("not signed in — `sentinel login`")));
     console.log("\n  " + bold("Security policy") + "  " + (warns.length ? yellow(warns.length + " warning(s)") : green("valid")));
