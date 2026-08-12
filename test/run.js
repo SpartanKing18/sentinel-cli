@@ -471,6 +471,10 @@ group("command registry (batch 1)");
   eq("encode hex", CMD_MAP.encode.run({ rest: ["hex", "Hello"], c: plain }), "48656c6c6f");
   eq("unknown type message", CMD_MAP.encode.run({ rest: ["zzz", "x"], c: plain }), "unknown type (b64|hex|url|base32)");
   eq("decode base32 invalid message", CMD_MAP.decode.run({ rest: ["base32", "!!!"], c: plain }), "(invalid base32)");
+  ok("uuid returns a v4 UUID", /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(CMD_MAP.uuid.run({ rest: [], c: plain })));
+  ok("passphrase default shape = 4 words + bits label", /^  \S+(-\S+){3}  \(~32 bits\)$/.test(CMD_MAP.passphrase.run({ rest: [], c: plain })));
+  ok("passphrase honors count arg (6 words, 48 bits)", /^  \S+(-\S+){5}  \(~48 bits\)$/.test(CMD_MAP.passphrase.run({ rest: ["6"], c: plain })));
+  ok("passphrase non-numeric arg -> default 4 words", /(-\S+){3}  \(~32 bits\)$/.test(CMD_MAP.passphrase.run({ rest: ["abc"], c: plain })));
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));

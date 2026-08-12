@@ -32,7 +32,6 @@ const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib
 // ---------- data ----------
 const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
 const { digests, genPass } = require("./lib/hashing"); // hash digests + password gen (lib/hashing.js)
-const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
 const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
 const { parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
@@ -635,7 +634,6 @@ async function cli(args) {
     else if (sub === "gist") await ghNewGist(rest[1], rest.slice(2).join(" "));
     else console.log("git clone|push|pull|status|log|diff|branch|checkout|repos|new|issues|prs|issue|pr|comment|gists|gist  (token: SENTINEL_GH_TOKEN)");
   }
-  else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "lab") { if (rest[0]) labOne(rest[0]); else labList(); }
@@ -644,7 +642,6 @@ async function cli(args) {
   else if (cmd === "myip") console.log(await myIp());
   else if (cmd === "ipinfo") await ipInfo(rest[0] || "");
   else if (cmd === "hashfile") fileHash(rest[0]);
-  else if (cmd === "uuid") console.log(crypto.randomUUID());
   else if (cmd === "serve") { serveDir(rest[0], rest[1]); await new Promise(() => {}); }
   else if (cmd === "listen") { listen(rest[0]); await new Promise(() => {}); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
