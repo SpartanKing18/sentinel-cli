@@ -424,6 +424,16 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("payload library");
+{
+  const { PAYLOADS_CLI, payloadClasses } = require("../lib/payloads");
+  eq("expected classes present", payloadClasses().sort(), ["cmdi", "lfi", "sqli", "ssrf", "ssti", "xss"]);
+  ok("every class has a non-empty string array", payloadClasses().every((c) => Array.isArray(PAYLOADS_CLI[c]) && PAYLOADS_CLI[c].length > 0 && PAYLOADS_CLI[c].every((p) => typeof p === "string" && p.length)));
+  ok("sqli includes the canonical tautology", PAYLOADS_CLI.sqli.includes("' OR '1'='1"));
+  ok("ssrf includes the cloud metadata endpoint", PAYLOADS_CLI.ssrf.some((p) => p.includes("169.254.169.254")));
+  ok("lfi includes an etc/passwd traversal", PAYLOADS_CLI.lfi.some((p) => p.includes("etc/passwd")));
+}
+
 group("google dork builder");
 {
   const { DORK_BASE, DORKS, dorkUrls } = require("../lib/dorks");

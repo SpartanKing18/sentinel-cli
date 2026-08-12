@@ -40,8 +40,9 @@ lib/
   revshell.js          reverse-shell one-liner payloads (pure, exact-output tested)
   httpstatus.js        HTTP status-code map + classification (pure lookup)
   dorks.js             google-dork catalog + URL builder (pure, tested)
+  payloads.js          attack-payload library by vuln class (pure data, tested)
 test/
-  run.js               framework-free unit suite (npm test) — 267 assertions
+  run.js               framework-free unit suite (npm test) — 272 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
