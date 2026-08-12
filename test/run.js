@@ -439,6 +439,12 @@ group("command registry (batch 1)");
   ok("port name lookup returns multi-line joined string", (() => { const s = CMD_MAP.port.run({ rest: ["http"], c: plain }); return s.split("\n").length >= 4 && s.includes("80") && s.includes("443"); })());
   ok("url returns a multi-line block ending in a blank line", (() => { const s = CMD_MAP.url.run({ rest: ["https://h.com:8443/p?a=1"], c: plain }); return s.endsWith("\n") && s.includes("scheme") && s.includes("8443") && s.includes("query params:"); })());
   ok("url usage on empty", CMD_MAP.url.run({ rest: [], c: plain }).includes("usage: sentinel url"));
+  ok("useragent + ua alias resolve to one entry", CMD_MAP.ua === CMD_MAP.useragent);
+  ok("useragent parses a Chrome UA", (() => { const s = CMD_MAP.useragent.run({ rest: ["Mozilla/5.0 (Windows NT 10.0) Chrome/120.0 Safari/537.36"], c: plain }); return s.includes("Chrome 120.0") && s.includes("Windows 10/11") && s.endsWith("\n"); })());
+  ok("cidr computes a /30", (() => { const s = CMD_MAP.cidr.run({ rest: ["10.0.0.0/30"], c: plain }); return s.includes("Network") && s.includes("Hosts") && s.includes("2"); })());
+  ok("cidr usage on garbage", CMD_MAP.cidr.run({ rest: ["nope"], c: plain }).includes("usage: sentinel cidr"));
+  ok("epoch + time + ts aliases share one entry", CMD_MAP.time === CMD_MAP.epoch && CMD_MAP.ts === CMD_MAP.epoch);
+  ok("epoch converts a fixed unix ts deterministically", (() => { const s = CMD_MAP.epoch.run({ rest: ["1700000000"], c: plain }); return s.includes("2023-11-14T22:13:20") && s.includes("epoch (ms)  1700000000000"); })());
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));

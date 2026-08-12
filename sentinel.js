@@ -31,13 +31,12 @@ const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter
 const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
 const { analyzeJwt } = require("./lib/jwt"); // JWT decode + expiry/alg analysis (lib/jwt.js)
-const { parseUA } = require("./lib/useragent"); // User-Agent parser (lib/useragent.js)
 
 // ---------- data ----------
 const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
 const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
 const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
-const { parsePorts, idHash, parseCve, cidrCalc } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
+const { parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const { SHELLS, revshell } = require("./lib/revshell"); // reverse-shell payloads (lib/revshell.js)
 
@@ -580,16 +579,6 @@ async function mainMenu() {
 }
 
 // ---------- extra utilities ----------
-function cidr(input) {
-  const c = cidrCalc(input);
-  if (!c) { console.log(red("usage: sentinel cidr 192.168.1.0/24")); return; }
-  h1("CIDR " + input);
-  console.log("  Network    " + cyan(c.network));
-  console.log("  Broadcast  " + cyan(c.broadcast));
-  console.log("  Netmask    " + c.netmask);
-  console.log("  Usable     " + c.firstUsable + "  -  " + c.lastUsable);
-  console.log("  Hosts      " + green(String(c.hosts)));
-}
 function jwtDecode(tok) {
   const a = analyzeJwt(tok);
   if (!a) { console.log(red("not a valid JWT (expected header.payload[.signature])")); return; }
@@ -689,16 +678,13 @@ async function cli(args) {
   else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log(revshell(lang, ip, port)); }
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
-  else if (cmd === "useragent" || cmd === "ua") { const u = parseUA(rest.join(" ")); if (!u) { console.log(red("usage: sentinel useragent <ua-string>   — parse browser/OS/device")); } else { h1("User-Agent"); const row = (k, v) => console.log("  " + k.padEnd(9) + v); row("browser", cyan(u.browser + (u.version ? " " + u.version : ""))); row("os", cyan(u.os)); row("device", u.device); row("bot", u.bot ? yellow("yes") : "no"); console.log(); } }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
-  else if (cmd === "epoch" || cmd === "time" || cmd === "ts") { const t = rest.join(" ").trim() || String(Math.floor(Date.now() / 1000)); const c = epochConvert(t); if (!c) { console.log(red("usage: sentinel epoch <unix-ts | ISO date>   (no arg = now)")); } else { h1("timestamp  (" + c.from + ")"); console.log("  epoch (s)   " + cyan(String(c.epochSeconds))); console.log("  epoch (ms)  " + String(c.epochMs)); console.log("  ISO 8601    " + cyan(c.iso)); console.log("  UTC         " + c.utc + "\n"); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "lab") { if (rest[0]) labOne(rest[0]); else labList(); }
   else if (cmd === "payloads") printPayloads(rest[0]);
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
   else if (cmd === "status") console.log(httpStatus(rest[0]));
-  else if (cmd === "cidr") cidr(rest[0]);
   else if (cmd === "jwt") jwtDecode(rest[0]);
   else if (cmd === "ipinfo") await ipInfo(rest[0] || "");
   else if (cmd === "dorks") dorks(rest[0]);
