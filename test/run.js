@@ -21,6 +21,7 @@ const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/sc
 const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
 const { defang, refang } = require("../lib/ioc");
 const { shannon, assess } = require("../lib/entropy");
+const { convert: epochConvert } = require("../lib/epoch");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -314,6 +315,16 @@ group("entropy tool (secret / randomness detection)");
   ok("random 32-hex key → high", assess("9f86d081884c7d659a2feaa0c55ad015").level === "high" && assess("9f86d081884c7d659a2feaa0c55ad015").likelySecret === true);
   ok("predictable value → low", assess("password").level === "low" && assess("aaaaaaaaaaaaaaaa").level === "low");
   ok("assess reports totalBits", Math.abs(assess("abcd").totalBits - 8) < 1e-9);
+}
+
+group("epoch / timestamp converter");
+{
+  ok("epoch 0 → 1970 ISO", epochConvert("0").iso === "1970-01-01T00:00:00.000Z");
+  ok("seconds → ISO", epochConvert("1700000000").iso === "2023-11-14T22:13:20.000Z" && epochConvert("1700000000").from === "epoch");
+  ok("13-digit ms treated as ms", epochConvert("1700000000000").iso === "2023-11-14T22:13:20.000Z" && epochConvert("1700000000000").epochMs === 1700000000000);
+  ok("ISO string → epoch seconds", epochConvert("2023-11-14T22:13:20Z").epochSeconds === 1700000000 && epochConvert("2023-11-14T22:13:20Z").from === "date");
+  ok("provides utc + epochMs", epochConvert("1700000000").epochMs === 1700000000000 && /GMT/.test(epochConvert("1700000000").utc));
+  ok("garbage → null", epochConvert("not-a-timestamp") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

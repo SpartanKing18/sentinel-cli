@@ -28,6 +28,7 @@ const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal ren
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 const { defang, refang } = require("./lib/ioc"); // IOC defang/refang tool (lib/ioc.js)
 const { assess: entropyAssess } = require("./lib/entropy"); // Shannon entropy tool (lib/entropy.js)
+const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter (lib/epoch.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -696,6 +697,7 @@ async function cli(args) {
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url)"); }
   else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
   else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
+  else if (cmd === "epoch" || cmd === "time" || cmd === "ts") { const t = rest.join(" ").trim() || String(Math.floor(Date.now() / 1000)); const c = epochConvert(t); if (!c) { console.log(red("usage: sentinel epoch <unix-ts | ISO date>   (no arg = now)")); } else { h1("timestamp  (" + c.from + ")"); console.log("  epoch (s)   " + cyan(String(c.epochSeconds))); console.log("  epoch (ms)  " + String(c.epochMs)); console.log("  ISO 8601    " + cyan(c.iso)); console.log("  UTC         " + c.utc + "\n"); } }
   else if (cmd === "entropy") { const t = rest.join(" "); if (!t) { console.log(red("usage: sentinel entropy <string>  — Shannon entropy (flags likely secrets)")); } else { const a = entropyAssess(t); const c = a.level === "high" ? red : a.level === "medium" ? yellow : green; console.log("  " + c(a.bitsPerChar.toFixed(2) + " bits/char") + gray("  ·  " + a.totalBits.toFixed(0) + " bits over " + a.length + " chars  ·  ") + c(a.level) + (a.likelySecret ? red("  (likely a secret/key)") : "")); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "hashid") console.log(idHash(rest.join(" ")));
@@ -2722,6 +2724,7 @@ function usage() {
     defang <ioc>                      neutralize a URL/IP/email for safe pasting (hxxp, [.])
     refang <text>                     reverse defang
     entropy <string>                  Shannon entropy — flag high-entropy secrets/keys
+    epoch [ts|date]                   unix timestamp <-> ISO/UTC (no arg = now)
     decode <b64|hex|url> <text>       decode text
     hash <text>                       md5 / sha1 / sha256 / sha512
     hashid <hash>                     identify a hash type

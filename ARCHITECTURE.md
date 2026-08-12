@@ -28,8 +28,9 @@ lib/
   loop.js              autonomous goal-loop controller (Nexus /loop)
   ioc.js               IOC defang / refang (safe-to-paste indicators)
   entropy.js           Shannon entropy — flag high-entropy secrets/keys
+  epoch.js             unix timestamp <-> ISO/UTC converter
 test/
-  run.js               framework-free unit suite (npm test) — 178 assertions
+  run.js               framework-free unit suite (npm test) — 184 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
