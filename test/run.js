@@ -17,7 +17,7 @@ const { pickCoderModel } = require("../lib/ollama");
 const { validatePolicy, validateTeam } = require("../lib/validate");
 const { oneline, extractJson } = require("../lib/text");
 const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
-const { TOP_PORTS, parsePorts, idHash, parseCve } = require("../lib/scanutil");
+const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/scanutil");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -267,6 +267,16 @@ group("security console core (scan/hash/cve)");
   ok("idHash unknown", idHash("hello") === "unknown");
   const cve = parseCve({ cve: { id: "CVE-2021-44228", published: "2021-12-10T10:15:09.143", descriptions: [{ lang: "en", value: "Log4Shell RCE" }], metrics: { cvssMetricV31: [{ cvssData: { baseScore: 10, baseSeverity: "CRITICAL" } }] } } });
   ok("parseCve extracts id/desc/score/sev/date", cve.id === "CVE-2021-44228" && cve.desc === "Log4Shell RCE" && cve.score === 10 && cve.sev === "CRITICAL" && cve.published === "2021-12-10");
+  // cidr subnet math (bit ops — off-by-one prone)
+  const c24 = cidrCalc("192.168.1.0/24");
+  ok("cidr /24 network+broadcast", c24.network === "192.168.1.0" && c24.broadcast === "192.168.1.255");
+  ok("cidr /24 netmask + 254 hosts", c24.netmask === "255.255.255.0" && c24.hosts === 254);
+  ok("cidr /24 usable range", c24.firstUsable === "192.168.1.1" && c24.lastUsable === "192.168.1.254");
+  ok("cidr non-aligned ip snaps to network", cidrCalc("10.0.0.130/25").network === "10.0.0.128" && cidrCalc("10.0.0.130/25").broadcast === "10.0.0.255");
+  ok("cidr /31 → 2 hosts (point-to-point)", cidrCalc("10.0.0.0/31").hosts === 2);
+  ok("cidr /32 → 1 host", cidrCalc("10.0.0.5/32").hosts === 1 && cidrCalc("10.0.0.5/32").network === "10.0.0.5");
+  ok("cidr /0 → whole space", cidrCalc("0.0.0.0/0").netmask === "0.0.0.0" && cidrCalc("0.0.0.0/0").broadcast === "255.255.255.255");
+  ok("cidr invalid → null", cidrCalc("not-a-cidr") === null && cidrCalc("192.168.1.0/33") === null && cidrCalc("999.1.1.1/24") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
