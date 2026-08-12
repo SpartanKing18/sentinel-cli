@@ -33,6 +33,7 @@ const { parseUrl } = require("./lib/urlparse"); // URL breakdown tool (lib/urlpa
 const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
 const { analyzeJwt } = require("./lib/jwt"); // JWT decode + expiry/alg analysis (lib/jwt.js)
+const { parseUA } = require("./lib/useragent"); // User-Agent parser (lib/useragent.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -711,6 +712,7 @@ async function cli(args) {
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
   else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
+  else if (cmd === "useragent" || cmd === "ua") { const u = parseUA(rest.join(" ")); if (!u) { console.log(red("usage: sentinel useragent <ua-string>   — parse browser/OS/device")); } else { h1("User-Agent"); const row = (k, v) => console.log("  " + k.padEnd(9) + v); row("browser", cyan(u.browser + (u.version ? " " + u.version : ""))); row("os", cyan(u.os)); row("device", u.device); row("bot", u.bot ? yellow("yes") : "no"); console.log(); } }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
   else if (cmd === "url") { const u = parseUrl(rest.join(" ")); if (!u) { console.log(red("usage: sentinel url <url>   e.g. sentinel url https://host.com:8443/a?x=1#f")); } else { h1("URL"); const row = (k, v) => { if (v !== "" && v != null) console.log("  " + k.padEnd(10) + cyan(v)); }; row("scheme", u.scheme); row("host", u.host); row("port", u.port); row("path", u.path); row("fragment", u.fragment); if (u.username) row("user", u.username); if (u.password) row("pass", u.password); const keys = Object.keys(u.params); if (keys.length) { console.log("  " + gray("query params:")); keys.forEach((k) => console.log("    " + k.padEnd(14) + cyan(u.params[k]))); } console.log(); } }
   else if (cmd === "incidr" || cmd === "inrange") { const r = inCidr(rest[0], rest[1]); if (r === null) console.log(red("usage: sentinel incidr <ip> <cidr>   e.g. sentinel incidr 10.0.0.5 10.0.0.0/24")); else console.log(r ? green("  yes") + gray(" — " + rest[0] + " is inside " + rest[1]) : red("  no") + gray(" — " + rest[0] + " is NOT inside " + rest[1])); }
@@ -2749,6 +2751,7 @@ function usage() {
     incidr <ip> <cidr>                is an IP inside a CIDR range? (firewall/allowlist checks)
     url <url>                         break a URL into scheme/host/port/path/query/fragment
     totp <base32-secret>              generate a 2FA (TOTP) code from a secret
+    useragent <ua-string>             parse a User-Agent (browser / OS / device / bot)
     cidr <a.b.c.d/xx>                 subnet calculator (range, hosts, mask)
     jwt <token>                       decode a JWT header + payload
     dorks <domain>                    print Google dork search URLs for a domain

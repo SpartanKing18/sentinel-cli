@@ -26,6 +26,7 @@ const { parseUrl } = require("../lib/urlparse");
 const { base32encode, base32decode } = require("../lib/base32");
 const { hotp, totp, secondsRemaining } = require("../lib/totp");
 const { decodeJwt, analyzeJwt } = require("../lib/jwt");
+const { parseUA } = require("../lib/useragent");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -393,6 +394,21 @@ group("JWT decode + analysis");
   ok("warns on alg=none", analyzeJwt(none).alg === "none" && analyzeJwt(none).warnings.some((w) => /alg=none/.test(w)));
   ok("no-exp token → state no-exp", analyzeJwt(mk({ alg: "HS256" }, { sub: "x" })).state === "no-exp");
   ok("garbage → null", analyzeJwt("not.a.jwt.x") === null && analyzeJwt("only-one-part") === null && decodeJwt("") === null);
+}
+
+group("User-Agent parser");
+{
+  const chrome = parseUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+  ok("Chrome on Windows 10 (not Safari)", chrome.browser === "Chrome" && chrome.version.startsWith("120") && chrome.os === "Windows 10/11" && chrome.device === "desktop");
+  const iphone = parseUA("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1");
+  ok("Safari on iOS mobile", iphone.browser === "Safari" && /iOS 17/.test(iphone.os) && iphone.device === "mobile");
+  const edge = parseUA("Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0");
+  ok("Edge (before Chrome)", edge.browser === "Edge");
+  const android = parseUA("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36");
+  ok("Android mobile", /Android 14/.test(android.os) && android.device === "mobile");
+  ok("curl is a bot", parseUA("curl/8.4.0").browser === "curl" && parseUA("curl/8.4.0").bot === true);
+  ok("Googlebot detected", parseUA("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)").bot === true);
+  ok("empty → null", parseUA("") === null && parseUA(null) === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
