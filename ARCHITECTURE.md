@@ -34,8 +34,9 @@ lib/
   totp.js              TOTP/HOTP 2FA codes (RFC 4226/6238)
   jwt.js               JWT decode + expiry/alg-none analysis
   useragent.js         User-Agent parser (browser/OS/device/bot)
+  ports.js             port <-> service map + bidirectional lookup
 test/
-  run.js               framework-free unit suite (npm test) — 227 assertions
+  run.js               framework-free unit suite (npm test) — 235 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

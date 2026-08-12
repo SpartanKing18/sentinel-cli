@@ -27,6 +27,7 @@ const { base32encode, base32decode } = require("../lib/base32");
 const { hotp, totp, secondsRemaining } = require("../lib/totp");
 const { decodeJwt, analyzeJwt } = require("../lib/jwt");
 const { parseUA } = require("../lib/useragent");
+const { portName, findByName, portLookup } = require("../lib/ports");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -409,6 +410,18 @@ group("User-Agent parser");
   ok("curl is a bot", parseUA("curl/8.4.0").browser === "curl" && parseUA("curl/8.4.0").bot === true);
   ok("Googlebot detected", parseUA("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)").bot === true);
   ok("empty → null", parseUA("") === null && parseUA(null) === null);
+}
+
+group("port <-> service lookup");
+{
+  ok("portName 22 → ssh, 3306 → mysql", portName(22) === "ssh" && portName(3306) === "mysql");
+  ok("portName unknown → null", portName(9999) === null);
+  ok("findByName redis → [6379]", JSON.stringify(findByName("redis")) === JSON.stringify([6379]));
+  ok("portLookup number", portLookup("3306").kind === "port" && portLookup("3306").service === "mysql");
+  ok("portLookup unknown number → null service", portLookup("9999").service === null);
+  ok("portLookup name → sorted ports", portLookup("mysql").kind === "name" && JSON.stringify(portLookup("mysql").ports) === JSON.stringify([3306]));
+  ok("portLookup http-family matches several", portLookup("http").ports.length >= 4);
+  ok("empty → null", portLookup("") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
