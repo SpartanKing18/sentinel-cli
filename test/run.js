@@ -466,6 +466,11 @@ group("command registry (batch 1)");
   ok("cheats no-arg lists topics", CMD_MAP.cheats.run({ rest: [], c: plain }).startsWith("topics: "));
   ok("cheats topic returns its lines", (() => { const s = CMD_MAP.cheats.run({ rest: ["nmap"], c: plain }); return s.includes("nmap") && !s.startsWith("topics:"); })());
   ok("cheats unknown topic falls back to topic list", CMD_MAP.cheats.run({ rest: ["zzz"], c: plain }).startsWith("topics: "));
+  eq("encode b64", CMD_MAP.encode.run({ rest: ["b64", "Hello World!"], c: plain }), "SGVsbG8gV29ybGQh");
+  eq("decode b64 roundtrips", CMD_MAP.decode.run({ rest: ["b64", "SGVsbG8gV29ybGQh"], c: plain }), "Hello World!");
+  eq("encode hex", CMD_MAP.encode.run({ rest: ["hex", "Hello"], c: plain }), "48656c6c6f");
+  eq("unknown type message", CMD_MAP.encode.run({ rest: ["zzz", "x"], c: plain }), "unknown type (b64|hex|url|base32)");
+  eq("decode base32 invalid message", CMD_MAP.decode.run({ rest: ["base32", "!!!"], c: plain }), "(invalid base32)");
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));
@@ -483,6 +488,15 @@ group("no dead lib imports in sentinel.js");
     return (src.match(re) || []).length === 1; // only the import itself
   });
   eq("every destructured lib import is used", dead, []);
+}
+
+group("encoders (shared CLI + menu)");
+{
+  const { ENC } = require("../lib/encoders");
+  eq("op keys present", Object.keys(ENC).sort(), ["b64d", "b64e", "base32d", "base32e", "hexd", "hexe", "urld", "urle"]);
+  ok("b64/hex/url/base32 all roundtrip", ["b64", "hex", "url", "base32"].every((t) => ENC[t + "d"](ENC[t + "e"]("Sentinel 42!")) === "Sentinel 42!"));
+  eq("url encodes a space", ENC.urle("a b"), "a%20b");
+  eq("invalid base32 -> guarded message", ENC.base32d("!!!"), "(invalid base32)");
 }
 
 group("hashing + password gen");

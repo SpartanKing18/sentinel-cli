@@ -27,7 +27,6 @@ const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A
 const { frameDiff, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 const { CMD_MAP } = require("./lib/registry"); // data-driven command registry (lib/registry.js)
-const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
 
 // ---------- data ----------
@@ -122,16 +121,7 @@ function scan(host, ports, timeout = 900, conc = 250) {
 }
 
 // ---------- encoders / hashes ----------
-const ENC = {
-  b64e: (s) => Buffer.from(s, "utf8").toString("base64"),
-  b64d: (s) => Buffer.from(s, "base64").toString("utf8"),
-  hexe: (s) => Buffer.from(s, "utf8").toString("hex"),
-  hexd: (s) => Buffer.from(s, "hex").toString("utf8"),
-  urle: (s) => encodeURIComponent(s),
-  urld: (s) => decodeURIComponent(s),
-  base32e: (s) => base32encode(s),
-  base32d: (s) => { const r = base32decode(s); return r == null ? "(invalid base32)" : r; },
-};
+const { ENC } = require("./lib/encoders"); // encode/decode op map, shared with the menu (lib/encoders.js)
 function hashes(s) { return digests(s).map(([a, hex]) => "  " + a.padEnd(8) + cyan(hex)).join("\n"); }
 
 // ---------- recon: DNS / WHOIS / headers ----------
@@ -645,7 +635,6 @@ async function cli(args) {
     else if (sub === "gist") await ghNewGist(rest[1], rest.slice(2).join(" "));
     else console.log("git clone|push|pull|status|log|diff|branch|checkout|repos|new|issues|prs|issue|pr|comment|gists|gist  (token: SENTINEL_GH_TOKEN)");
   }
-  else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
