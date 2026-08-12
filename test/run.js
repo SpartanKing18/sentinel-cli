@@ -14,6 +14,7 @@ const { TOOL_CATALOG, discoverTools } = require("../lib/tools");
 const { createBgJobs, MAX_BUF } = require("../lib/bgjobs");
 const { SETTINGS, describe } = require("../lib/settings");
 const { pickCoderModel } = require("../lib/ollama");
+const { validatePolicy, validateTeam } = require("../lib/validate");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -184,6 +185,20 @@ group("ollama coder-model selection");
   ok("falls back to code-ish", pickCoderModel(["mystery-code-model", "random"]) === "mystery-code-model");
   ok("falls back to first", pickCoderModel(["random1", "random2"]) === "random1");
   ok("empty → empty string", pickCoderModel([]) === "");
+}
+
+group("config validation (.nexus/policy.json + team.json)");
+{
+  ok("valid policy → no warnings", validatePolicy({ protectedPaths: ["*.env"], blockSecrets: true, maxFilesPerTurn: 5 }).length === 0);
+  ok("protectedPaths wrong type", validatePolicy({ protectedPaths: "nope" })[0].includes("must be an array"));
+  ok("blockSecrets wrong type", validatePolicy({ blockSecrets: "yes" })[0].includes("true or false"));
+  ok("negative maxFilesPerTurn", validatePolicy({ maxFilesPerTurn: -1 }).some((s) => />= 0/.test(s)));
+  ok("invalid denied-command regex", validatePolicy({ deniedCommands: ["("] }).some((s) => /invalid regex/.test(s)));
+  ok("non-object policy", validatePolicy(42)[0].includes("must be a JSON object"));
+  ok("valid team → no warnings", validateTeam({ roles: [{ role: "builder", engine: "claude" }], maxRounds: 2 }, ["claude", "ollama"]).length === 0);
+  ok("team role missing engine", validateTeam({ roles: [{ role: "builder" }] }).some((s) => /missing 'engine'/.test(s)));
+  ok("team unknown engine", validateTeam({ roles: [{ role: "x", engine: "gpt9" }] }, ["claude"]).some((s) => /unknown engine/.test(s)));
+  ok("team bad maxRounds", validateTeam({ maxRounds: 0 }).some((s) => />= 1/.test(s)));
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
