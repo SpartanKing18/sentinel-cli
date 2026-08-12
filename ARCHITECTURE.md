@@ -18,8 +18,10 @@ lib/
   styles.js            output styles (built-in + custom .nexus/styles/*.md)
   memory.js            durable-note merge with dedup (the agent `remember` tool)
   tools.js             local-agent tool catalog + `discover` keyword search
+  bgjobs.js            background-command manager (run_background/check_background)
+  settings.js          data-driven schema behind the /settings panel
 test/
-  run.js               framework-free unit suite (npm test) — 82 assertions
+  run.js               framework-free unit suite (npm test) — 97 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

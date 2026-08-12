@@ -11,6 +11,8 @@ const { styleNames, styleDirective } = require("../lib/styles");
 const { mergeMemory } = require("../lib/memory");
 const { STYLES, allStyles, loadStyles } = require("../lib/styles");
 const { TOOL_CATALOG, discoverTools } = require("../lib/tools");
+const { createBgJobs, MAX_BUF } = require("../lib/bgjobs");
+const { SETTINGS, describe } = require("../lib/settings");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -136,6 +138,39 @@ group("discover tool (Glitch idea)");
   ok("query 'http' finds http_fetch", discoverTools("http", TOOL_CATALOG).some((t) => t.name === "http_fetch"));
   ok("empty query → all tools", discoverTools("", TOOL_CATALOG).length === TOOL_CATALOG.length);
   ok("no match → empty", discoverTools("zzzznomatch", TOOL_CATALOG).length === 0);
+}
+
+group("background jobs (Claude-Code idea) — state machine");
+{
+  const bg = createBgJobs();
+  const id = bg.start("npm run dev", { kill() { this.killed = true; } }, 1000);
+  ok("starts running", bg.get(id).status === "running" && bg.running() === 1);
+  bg.append(id, "listening on :3000\n"); bg.append(id, "compiled\n");
+  ok("buffers output", bg.tail(id).includes("listening on :3000") && bg.tail(id).includes("compiled"));
+  ok("list shape", bg.list()[0].id === id && bg.list()[0].status === "running" && bg.list()[0].bytes > 0);
+  bg.finish(id, 0);
+  ok("finish -> done, running=0", bg.get(id).status === "done" && bg.get(id).code === 0 && bg.running() === 0);
+  ok("finish is idempotent", (bg.finish(id, 7), bg.get(id).code === 0)); // already done, code unchanged
+  const bg2 = createBgJobs(); const child = { killed: false, kill() { this.killed = true; } };
+  const id2 = bg2.start("sleep 999", child, 0); bg2.killAll();
+  ok("killAll kills running + marks killed", child.killed === true && bg2.get(id2).status === "killed");
+  const bg3 = createBgJobs(); const id3 = bg3.start("x", null, 0); bg3.append(id3, "y".repeat(MAX_BUF + 5000));
+  ok("output buffer is bounded", bg3.get(id3).out.length <= MAX_BUF);
+}
+
+group("settings schema (data-driven /settings panel)");
+{
+  const v = { engine: "claude", model: "opus", effort: "high", fallback: "", style: "review", lean: true, cowork: { on: true, strong: "opus", weak: "haiku" }, costCap: 5, cost: 0.1234, mode: "plan", guard: "enforce", policyOrg: true, audit: true, redact: true, offline: false, notify: true, ctxPct: 42, pins: 2, bgRunning: 1 };
+  const d = describe(v);
+  ok("groups present", d.map((g) => g.group).join(",") === "Model,Output,Cost,Safety & policy,Privacy,Session");
+  const flat = {}; d.forEach((g) => g.rows.forEach((r) => (flat[r.label] = r.value)));
+  ok("engine value", flat["Engine"] === "claude");
+  ok("style value", flat["Output style"] === "review");
+  ok("lean on", flat["Lean output"] === "on");
+  ok("cowork rendered", flat["Cowork (strong+weak)"] === "opus -> haiku");
+  ok("budget rendered", flat["Budget cap"] === "$5.00");
+  ok("policy org-enforced", flat["Security policy"] === "org-enforced");
+  ok("every row has a cmd", d.every((g) => g.rows.every((r) => r.cmd && r.cmd.length)));
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
