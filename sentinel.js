@@ -791,6 +791,23 @@ async function cli(args) {
     if (rest[0] === "verify") { const v = auditVerify(process.cwd()); if (v.empty) { console.log("  " + gray("audit trail is empty — nothing to verify")); process.exit(0); } console.log(v.ok ? "  " + green("OK") + " audit trail intact — " + v.count + " record(s), hash chain verified" : "  " + red("TAMPERED") + " — " + v.reason + " at record #" + v.badLine + " of " + v.count); process.exit(v.ok ? 0 : 1); } // CI gate: non-zero exit on tamper
     else { try { const fs = require("fs"), path = require("path"); const raw = fs.readFileSync(path.join(process.cwd(), ".nexus", "audit.jsonl"), "utf8").trim().split("\n").filter(Boolean); const show = (rest[0] === "--json") ? raw.slice(-50).join("\n") : raw.slice(-20).map((l) => { try { const e = JSON.parse(l); return "  " + gray((e.ts || "").slice(0, 19).replace("T", " ")) + " " + (e.status === "blocked" ? red("blocked") : e.status === "error" ? yellow("error  ") : green("ok     ")) + " " + (e.tool || "") + gray(" " + (e.path || e.cmd || "") + (e.reason ? " — " + e.reason : "")); } catch (_) { return ""; } }).filter(Boolean).join("\n"); const v = auditVerify(process.cwd()); console.log(show + "\n  " + (v.ok ? green("chain verified (" + v.count + ")") : red("CHAIN BROKEN — sentinel audit verify"))); } catch (_) { console.log("  " + gray("no audit trail (.nexus/audit.jsonl) in this directory")); } }
   }
+  else if (cmd === "doctor") {
+    banner(); h1("Nexus doctor");
+    console.log("  " + bold("AI engines") + gray("  (● installed)"));
+    for (const e of ENGINE_ORDER) console.log("    " + (engineAvail(e) ? green("●") : gray("○")) + " " + e.padEnd(9) + gray(ENGINES[e].label));
+    const reach = await ollamaReachable();
+    console.log("    " + (reach ? green("●") : yellow("○")) + " " + "ollama".padEnd(9) + gray(reach ? "server reachable" : "server not reachable — start Ollama or run `sentinel nexus setup`"));
+    const auth = nexusAuth();
+    console.log("\n  " + bold("Account") + "  " + (auth ? green("signed in ") + gray("as " + (auth.name || auth.email || auth.uid)) : gray("not signed in — `sentinel login`")));
+    const warns = policyWarnings(process.cwd());
+    console.log("\n  " + bold("Security policy") + "  " + (warns.length ? yellow(warns.length + " warning(s)") : green("valid")));
+    warns.forEach((w) => console.log("    " + yellow("• " + w)));
+    const v = auditVerify(process.cwd());
+    console.log("\n  " + bold("Audit trail") + "  " + (v.empty ? gray("empty (no enforced actions yet)") : v.ok ? green("intact") + gray(" — " + v.count + " records, hash chain verified") : red("TAMPERED") + " — " + v.reason));
+    const problem = warns.length || (v.ok === false);
+    console.log("\n  " + (problem ? yellow("some checks need attention") : green("all systems healthy")) + "\n");
+    process.exit(problem ? 1 : 0);
+  }
   else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {
     const sub = (rest[0] || "").toLowerCase();
     if (sub === "init") nexusInit();
@@ -2688,6 +2705,7 @@ function usage() {
   ${bold("COMMANDS")}
     init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
     docs [topic]                      built-in Nexus documentation (docs all for everything)
+    doctor                            health check: engines, Ollama, policy, audit chain
     policy [--json]                   show the effective security policy (org floor + local)
     audit [verify|--json]             show the audit trail; 'verify' checks the hash chain (exit 1 if tampered)
     login [google|github|<code>]      sign in (paste your code from the website Settings)
