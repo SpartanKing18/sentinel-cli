@@ -22,6 +22,7 @@ const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/lo
 const { defang, refang } = require("../lib/ioc");
 const { shannon, assess } = require("../lib/entropy");
 const { convert: epochConvert } = require("../lib/epoch");
+const { parseUrl } = require("../lib/urlparse");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -332,6 +333,17 @@ group("epoch / timestamp converter");
   ok("ISO string → epoch seconds", epochConvert("2023-11-14T22:13:20Z").epochSeconds === 1700000000 && epochConvert("2023-11-14T22:13:20Z").from === "date");
   ok("provides utc + epochMs", epochConvert("1700000000").epochMs === 1700000000000 && /GMT/.test(epochConvert("1700000000").utc));
   ok("garbage → null", epochConvert("not-a-timestamp") === null);
+}
+
+group("URL parser tool");
+{
+  const u = parseUrl("https://user:pw@host.example.com:8443/a/b?x=1&y=2#frag");
+  ok("full URL breakdown", u.scheme === "https" && u.host === "host.example.com" && u.port === "8443" && u.path === "/a/b");
+  ok("query params + fragment + creds", u.params.x === "1" && u.params.y === "2" && u.fragment === "frag" && u.username === "user" && u.password === "pw");
+  const s = parseUrl("example.com:8080/api?q=test");
+  ok("scheme-less host:port defaults to http", s.scheme === "http" && s.host === "example.com" && s.port === "8080" && s.params.q === "test");
+  ok("plain domain", parseUrl("evil.com").host === "evil.com" && parseUrl("evil.com").scheme === "http");
+  ok("empty / garbage → null", parseUrl("") === null && parseUrl("http://") === null);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
