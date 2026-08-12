@@ -783,6 +783,7 @@ async function cli(args) {
   else if (cmd === "logout") console.log(nexusLogout() ? "  " + green("signed out.") : "  " + gray("was not signed in."));
   else if (cmd === "whoami") { const a = nexusAuth(); console.log(a ? "  " + (a.name || a.email || a.uid) + gray("  " + String(a.provider).replace(".com", "")) : "  " + gray("not signed in")); }
   else if (cmd === "policy") {
+    if (rest[0] === "init") { const fs = require("fs"), path = require("path"); const dir = path.join(process.cwd(), ".nexus"), f = path.join(dir, "policy.json"); if (fs.existsSync(f)) console.log("  " + yellow(".nexus/policy.json already exists — not overwriting")); else { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(f, JSON.stringify(POLICY_DEFAULTS, null, 2) + "\n"); console.log("  " + green("created ") + ".nexus/policy.json" + gray(" — a starting policy; tighten protected paths, denied commands, and limits, then ") + cyan("sentinel policy") + gray(" to review")); } return; }
     const p = loadPolicy(process.cwd());
     if (rest[0] === "--json") { console.log(JSON.stringify(p, null, 2)); }
     else { banner(); h1("Effective security policy" + (p.org ? "  (ORG-ENFORCED)" : "")); const row = (k, v) => console.log("  " + k.padEnd(22) + v); row("source", p.org ? "org floor (~/.sentinel/policy.json) + local .nexus/policy.json" : ".nexus/policy.json (or defaults)"); row("protected paths", (p.protectedPaths || []).length + "  " + gray((p.protectedPaths || []).slice(0, 6).join(", ") + ((p.protectedPaths || []).length > 6 ? " …" : ""))); row("denied commands", (p.deniedCommands || []).length ? p.deniedCommands.join(", ") : gray("(built-in destructive guard only)")); row("max files / turn", p.maxFilesPerTurn || gray("unlimited")); row("block secret writes", p.blockSecrets ? green("on") : red("off")); row("network", p.allowNetwork ? "allowed" : red("blocked")); row("audit", p.audit ? "on (.nexus/audit.jsonl, hash-chained)" : gray("off")); const warns = policyWarnings(process.cwd()); if (warns.length) { console.log("\n  " + yellow("config warnings:")); warns.forEach((wn) => console.log("    " + yellow("• " + wn))); } console.log("\n  " + gray("machine-readable: ") + cyan("sentinel policy --json") + "\n"); }
@@ -2701,7 +2702,7 @@ function usage() {
     init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
     docs [topic]                      built-in Nexus documentation (docs all for everything)
     doctor                            health check: engines, Ollama, policy, audit chain
-    policy [--json]                   show the effective security policy (org floor + local)
+    policy [init|--json]              show/scaffold the security policy (init writes a starter .nexus/policy.json)
     audit [verify|--json]             show the audit trail; 'verify' checks the hash chain (exit 1 if tampered)
     login [google|github|<code>]      sign in (paste your code from the website Settings)
     nexus [opts] [task]               Nexus AI coder chat: -e claude|gemini|codex|opencode|aider|ollama, -y skip prompts, --print headless
