@@ -1532,7 +1532,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const sess = { model: engine, ctxWindow: CTXW[engine] || 200000, ctxUsed: 0, inTok: 0, outTok: 0, cost: 0, liveOut: 0 };
     const oMsgs = nexusMd ? [{ role: "system", content: "You are Nexus, a concise expert coding assistant.\n" + nexusMd }] : [{ role: "system", content: "You are Nexus, a concise expert coding assistant." }];
     let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
-    let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom
+    let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0, menuSel = 0; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom; menuSel = highlighted slash-menu row
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
     const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
@@ -1761,6 +1761,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const hint = () => {
       const C = cols();
       if (compact.on) { const n = 22, f = Math.min(n, compact.f); return clip("  " + yellow("Compacting conversation… ") + gray("[") + cyan("▓".repeat(f)) + gray("░".repeat(n - f)) + gray("] ") + Math.round((f / n) * 100) + "%", C - 2); }
+      if (slashMatches().length) return clip("  " + blue("↑↓") + gray("/wheel select  ") + blue("Tab") + gray(" complete  ") + blue("↵") + gray(" run  ") + blue("space") + gray(" dismiss"), C - 2);
       if (scroll > 0) return clip("  " + yellow("↑ scrolled — " + scroll + " line" + (scroll > 1 ? "s" : "") + " below") + gray("  ·  ") + blue("PgUp/PgDn") + gray(" or wheel to scroll  ") + blue("End") + gray(" jump to latest"), C - 2);
       return clip("  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("@") + gray("file ") + blue("!") + gray("sh ") + blue("#") + gray("note  ") + blue("/") + gray("cmds"), C - 2);
     };
@@ -1787,7 +1788,11 @@ function nexusTui(engine, cwd, nexusMd) {
       const C = cols(), R = rows(), iw = Math.max(4, C - 3);
       const wrapped = []; for (const seg of input.split("\n")) { let s = seg; if (!s.length) { wrapped.push(""); continue; } while (s.length > iw) { wrapped.push(s.slice(0, iw)); s = s.slice(iw); } wrapped.push(s); } if (!wrapped.length) wrapped.push("");
       const menu = slashMatches();
+      if (menuSel > menu.length - 1) menuSel = Math.max(0, menu.length - 1);
+      if (menuSel < 0) menuSel = 0;
       const menuRows = Math.min(menu.length, Math.max(0, R - 8));
+      // scroll the menu window so the highlighted row stays visible when the list is long
+      const menuStart = menu.length > menuRows ? Math.max(0, Math.min(menuSel - (menuRows >> 1), menu.length - menuRows)) : 0;
       // clamp input rows so the whole chrome always fits even on short terminals
       const maxIn = Math.max(1, R - 5 - menuRows);
       const inRows = Math.max(1, Math.min(wrapped.length, 8, maxIn));
@@ -1804,7 +1809,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const frame = [];
       for (let i = 0; i < bodyRows; i++) frame.push(" " + clip(view[i] || "", C - 2));
       frame.push(statusBar());
-      for (let i = 0; i < menuRows; i++) { const [nm, ds] = menu[i]; const sel = i === 0; frame.push(clip((sel ? cyan(" › ") : "   ") + (sel ? bold(cyan(nm)) : cyan(nm)) + gray("  " + ds), C - 2)); }
+      for (let i = 0; i < menuRows; i++) { const idx = menuStart + i; const [nm, ds] = menu[idx]; const sel = idx === menuSel; const pos = (sel && menu.length > menuRows) ? gray("  (" + (menuSel + 1) + "/" + menu.length + ")") : ""; frame.push(clip((sel ? cyan(" › ") : "   ") + (sel ? bold(cyan(nm)) : cyan(nm)) + gray("  " + ds) + pos, C - 2)); }
       frame.push(gray("─".repeat(C)));
       const shown = wrapped.slice(Math.max(0, wrapped.length - inRows));
       for (let i = 0; i < inRows; i++) { const c = (i === inRows - 1 && !busy) ? "█" : ""; frame.push((i === 0 ? bold(mag("❯ ")) : "  ") + (shown[i] || "") + c); }
@@ -2506,7 +2511,7 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x1b[6~") { scroll = Math.max(0, scroll - page); render(); return; } // PageDown
       if (s === "\x1b[F" || s === "\x1b[4~" || s === "\x1bOF") { scroll = 0; render(); return; } // End -> latest
       if (s === "\x1b[1~" || s === "\x1bOH" || s === "\x1b[H") { scroll += 100000; render(); return; } // Home -> top (clamped in render)
-      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);\d+;\d+[Mm]/.exec(s); if (m) { const btn = +m[1]; if (btn === 64) { scroll += 3; render(); } else if (btn === 65) { scroll = Math.max(0, scroll - 3); render(); } } return; } // SGR mouse wheel
+      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);\d+;\d+[Mm]/.exec(s); if (m) { const btn = +m[1]; const mm = slashMatches(); if (mm.length) { if (btn === 64) { menuSel = Math.max(0, menuSel - 1); render(); } else if (btn === 65) { menuSel = Math.min(mm.length - 1, menuSel + 1); render(); } } else { if (btn === 64) { scroll += 3; render(); } else if (btn === 65) { scroll = Math.max(0, scroll - 3); render(); } } } return; } // SGR mouse wheel — moves the slash menu when it's open, else scrolls the transcript
       if (busy) return;                                                  // ignore typing mid-turn (scroll/interrupt/mode still work above)
       // ---- bracketed paste (handles multi-line pastes, possibly split across chunks) ----
       if (pasteBuf !== null || s.indexOf("\x1b[200~") !== -1) {
@@ -2518,21 +2523,21 @@ function nexusTui(engine, cwd, nexusMd) {
         input += pasteBuf.replace(/\r\n?|\n/g, " ").replace(/[^\x20-\x7e]+/g, "");
         pasteBuf = null; render(); return;
       }
-      if (s === "\x1b[A") { if (history.length) { hIdx = Math.max(0, hIdx - 1); input = history[hIdx] || ""; render(); } return; } // up
-      if (s === "\x1b[B") { if (history.length) { hIdx = Math.min(history.length, hIdx + 1); input = history[hIdx] || ""; render(); } return; } // down
+      if (s === "\x1b[A") { const mm = slashMatches(); if (mm.length) { menuSel = Math.max(0, menuSel - 1); render(); return; } if (history.length) { hIdx = Math.max(0, hIdx - 1); input = history[hIdx] || ""; render(); } return; } // up: menu selection when open, else history
+      if (s === "\x1b[B") { const mm = slashMatches(); if (mm.length) { menuSel = Math.min(mm.length - 1, menuSel + 1); render(); return; } if (history.length) { hIdx = Math.min(history.length, hIdx + 1); input = history[hIdx] || ""; render(); } return; } // down: menu selection when open, else history
       if (s.charCodeAt(0) === 27) return;                                // other escapes
       for (const ch of s) {
-        if (ch === "\t") { // Tab completes a slash command, else an @file path
-          const mm = slashMatches(); if (mm.length) { input = mm[0][0] + " "; render(); return; }
+        if (ch === "\t") { // Tab completes the highlighted slash command, else an @file path
+          const mm = slashMatches(); if (mm.length) { input = (mm[menuSel] || mm[0])[0] + " "; menuSel = 0; render(); return; }
           const at = input.match(/@([^\s]*)$/);
           if (at) { try { const pt = at[1]; const dir = pt.includes("/") ? pt.slice(0, pt.lastIndexOf("/") + 1) : ""; const bpart = pt.includes("/") ? pt.slice(pt.lastIndexOf("/") + 1) : pt; const entries = fs.readdirSync(path.resolve(cwd, dir || ".")).filter((e) => e.startsWith(bpart)).sort(); if (entries.length) { const hit = entries[0]; const isDir = fs.statSync(path.resolve(cwd, dir + hit)).isDirectory(); input = input.slice(0, at.index) + "@" + dir + hit + (isDir ? "/" : " "); } } catch (_) {} render(); }
           return;
         }
         if (ch === "\r" || ch === "\n") {
           if (input.endsWith("\\")) { input = input.slice(0, -1) + "\n"; render(); return; } // trailing backslash = newline, not submit
-          const t = input.trim(); input = ""; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { let cmd = t; if (!/\s/.test(t)) { const mm = fuzzyCmds(t); if (mm.length && !mm.some((c) => c[0] === t.toLowerCase())) cmd = mm[0][0]; } handleSlash(cmd); render(); return; } if (t[0] === "!" && t.length > 1) { runBang(t.slice(1).trim()); render(); return; } if (t[0] === "#" && t.length > 1) { addMemory(t.slice(1).trim()); render(); return; } if (t) { submit(t); return; } render(); }
-        else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); render(); }
-        else if (ch >= " ") { input += ch; render(); }
+          const t = input.trim(); input = ""; const pick = menuSel; menuSel = 0; if (/^\/(exit|quit|q)$/i.test(t)) { cleanup(); resolve(); return; } if (t.startsWith("/")) { let cmd = t; if (!/\s/.test(t)) { const mm = fuzzyCmds(t); if (mm.length) cmd = (mm[pick] || mm[0])[0]; } handleSlash(cmd); render(); return; } if (t[0] === "!" && t.length > 1) { runBang(t.slice(1).trim()); render(); return; } if (t[0] === "#" && t.length > 1) { addMemory(t.slice(1).trim()); render(); return; } if (t) { submit(t); return; } render(); }
+        else if (ch === "\x7f" || ch === "\b") { input = input.slice(0, -1); menuSel = 0; render(); }
+        else if (ch >= " ") { input += ch; menuSel = 0; render(); }
       }
     } catch (err) { busy = false; try { transcript.push({ role: "system", text: "internal error: " + (err && err.message || err) }); render(); } catch (_) {} } });
     out.on("resize", onResize);
