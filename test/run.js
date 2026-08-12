@@ -15,6 +15,7 @@ const { createBgJobs, MAX_BUF } = require("../lib/bgjobs");
 const { SETTINGS, describe } = require("../lib/settings");
 const { pickCoderModel } = require("../lib/ollama");
 const { validatePolicy, validateTeam } = require("../lib/validate");
+const { oneline, extractJson } = require("../lib/text");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -220,6 +221,16 @@ group("edge cases");
   ok("codex takes the latest message", codexParse([JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "first" } }), JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "final answer" } })].join("\n")).text === "final answer");
   // discoverTools: case-insensitive keyword
   ok("discover is case-insensitive", discoverTools("HTTP", TOOL_CATALOG).some((t) => t.name === "http_fetch"));
+}
+
+group("text helpers");
+{
+  ok("oneline collapses whitespace", oneline("a\n  b\t c") === "a b c");
+  ok("oneline truncates with ellipsis", oneline("abcdefghij", 5) === "abcd…" && oneline("abcdefghij", 5).length === 5);
+  ok("oneline short passes through", oneline("hi", 10) === "hi");
+  ok("extractJson from noisy text (obj)", extractJson("blah {\"a\":1} tail").a === 1);
+  ok("extractJson array", Array.isArray(extractJson("x [1,2,3] y")) && extractJson("x [1,2,3] y")[2] === 3);
+  ok("extractJson fallback on garbage", extractJson("no json here", "FB") === "FB");
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

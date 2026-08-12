@@ -1474,11 +1474,7 @@ async function deviceTool(name, a, cwd) {
 const { MODEL_PRICE, priceOf, isMechanical, shouldDelegate } = require("./lib/pricing"); // cost model (lib/pricing.js)
 // Sentinel preflight — classify a shell command's destructive intent (inspired by Glitch's
 // Sentinel, improved: names the matched rule, covers pipe-to-shell + fork bombs, 3 levels).
-function extractJson(text, fallback) {
-  const s = String(text || ""); const arr = s.match(/\[[\s\S]*\]/), obj = s.match(/\{[\s\S]*\}/);
-  for (const m of [arr, obj]) if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
-  return fallback;
-}
+const { oneline, extractJson } = require("./lib/text"); // pure text helpers (lib/text.js)
 async function planGoal(engine, model, goal, memory) {
   const prompt = "You are a senior engineer planning autonomous work. Break the GOAL into an ordered list of concrete, independently-verifiable tasks (about 5-15). Return ONLY a JSON array of short task strings — no prose, no markdown.\n\nGOAL: " + goal + (memory ? "\n\nPROJECT MEMORY:\n" + memory : "");
   let text;
@@ -1688,7 +1684,6 @@ function nexusTui(engine, cwd, nexusMd) {
     const clip = (s, n) => { let o = "", v = 0; for (const part of String(s).split(/(\x1b\[[0-9;]*m)/)) { if (/^\x1b/.test(part)) { o += part; continue; } for (const ch of part) { if (v >= n) return o; o += ch; v++; } } return o; };
     const fmtK = (n) => n >= 100000 ? (n / 1000).toFixed(0) + "k" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : "" + (n | 0);
     const base = (pth) => String(pth || "").split("/").pop() || String(pth || "");
-    const oneline = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > (n || 44) ? s.slice(0, (n || 44) - 1) + "…" : s; };
     // ---- NEXUS logo (gradient) + slash-command menu ----
     // Each theme = a 6-stop logo/boot gradient + an accent hue that recolors the
     // whole UI (prompt, borders, highlights) by rebinding A.cyan, the de-facto accent.
