@@ -157,6 +157,9 @@ group("background jobs (Claude-Code idea) — state machine");
   ok("killAll kills running + marks killed", child.killed === true && bg2.get(id2).status === "killed");
   const bg3 = createBgJobs(); const id3 = bg3.start("x", null, 0); bg3.append(id3, "y".repeat(MAX_BUF + 5000));
   ok("output buffer is bounded", bg3.get(id3).out.length <= MAX_BUF);
+  const bg4 = createBgJobs(); const kc = { kill() { this.k = true; } }; const id4 = bg4.start("srv", kc, 0);
+  ok("stop() kills a specific job", bg4.stop(id4) === true && kc.k === true && bg4.get(id4).status === "killed");
+  ok("stop() unknown id → false", bg4.stop("nope") === false);
 }
 
 group("settings schema (data-driven /settings panel)");
