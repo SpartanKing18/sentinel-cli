@@ -42,9 +42,9 @@ lib/
   dorks.js             google-dork catalog + URL builder (pure, tested)
   payloads.js          attack-payload library by vuln class (pure data, tested)
   cheats.js            command cheat-sheets by topic (pure data, tested)
-  registry.js          data-driven command registry (10 cmds: +useragent/cidr/epoch)
+  registry.js          data-driven command registry (11 pure mini-tools: defang/refang/entropy/incidr/hashid/port/url/useragent/cidr/epoch/jwt)
 test/
-  run.js               framework-free unit suite (npm test) — 295 assertions
+  run.js               framework-free unit suite (npm test) — 299 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

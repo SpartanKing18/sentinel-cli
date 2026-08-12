@@ -27,10 +27,8 @@ const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A
 const { frameDiff, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 const { CMD_MAP } = require("./lib/registry"); // data-driven command registry (lib/registry.js)
-const { convert: epochConvert } = require("./lib/epoch"); // timestamp converter (lib/epoch.js)
 const { base32encode, base32decode } = require("./lib/base32"); // base32 (lib/base32.js)
 const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
-const { analyzeJwt } = require("./lib/jwt"); // JWT decode + expiry/alg analysis (lib/jwt.js)
 
 // ---------- data ----------
 const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
@@ -579,20 +577,6 @@ async function mainMenu() {
 }
 
 // ---------- extra utilities ----------
-function jwtDecode(tok) {
-  const a = analyzeJwt(tok);
-  if (!a) { console.log(red("not a valid JWT (expected header.payload[.signature])")); return; }
-  h1("JWT");
-  console.log(gray("// header")); console.log(JSON.stringify(a.header, null, 2));
-  console.log(gray("\n// payload")); console.log(JSON.stringify(a.payload, null, 2));
-  const humanT = (t) => { const c = epochConvert(String(t)); return c ? c.iso.replace(/\.000Z$/, "Z") : String(t); };
-  const times = []; if (a.iat != null) times.push("iat " + humanT(a.iat)); if (a.nbf != null) times.push("nbf " + humanT(a.nbf)); if (a.exp != null) times.push("exp " + humanT(a.exp));
-  if (times.length) console.log(gray("\n// times: ") + times.join(gray("  ·  ")));
-  const sc = (a.state === "expired" || a.state === "not-yet-valid") ? red : a.state === "valid" ? green : gray;
-  console.log("\n  status: " + sc(a.state.toUpperCase()) + gray("   (signature NOT verified — no key)"));
-  for (const w of a.warnings) console.log("  " + yellow("warning: " + w));
-  if (a.signature) console.log(gray("\nsignature: ") + a.signature);
-}
 async function ipInfo(ip) {
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
   try {
@@ -685,7 +669,6 @@ async function cli(args) {
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
   else if (cmd === "status") console.log(httpStatus(rest[0]));
-  else if (cmd === "jwt") jwtDecode(rest[0]);
   else if (cmd === "ipinfo") await ipInfo(rest[0] || "");
   else if (cmd === "dorks") dorks(rest[0]);
   else if (cmd === "hashfile") fileHash(rest[0]);

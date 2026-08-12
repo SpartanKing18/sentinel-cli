@@ -445,6 +445,17 @@ group("command registry (batch 1)");
   ok("cidr usage on garbage", CMD_MAP.cidr.run({ rest: ["nope"], c: plain }).includes("usage: sentinel cidr"));
   ok("epoch + time + ts aliases share one entry", CMD_MAP.time === CMD_MAP.epoch && CMD_MAP.ts === CMD_MAP.epoch);
   ok("epoch converts a fixed unix ts deterministically", (() => { const s = CMD_MAP.epoch.run({ rest: ["1700000000"], c: plain }); return s.includes("2023-11-14T22:13:20") && s.includes("epoch (ms)  1700000000000"); })());
+  {
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const mk = (h, p) => b64(h) + "." + b64(p) + ".sig";
+    const valid = mk({ alg: "HS256", typ: "JWT" }, { sub: "1", exp: 9999999999 });
+    const expired = mk({ alg: "HS256", typ: "JWT" }, { sub: "2", exp: 1000000000 });
+    const none = mk({ alg: "none", typ: "JWT" }, { sub: "3" });
+    ok("jwt VALID state for far-future exp", CMD_MAP.jwt.run({ rest: [valid], c: plain }).includes("status: VALID"));
+    ok("jwt EXPIRED state for past exp", CMD_MAP.jwt.run({ rest: [expired], c: plain }).includes("status: EXPIRED"));
+    ok("jwt flags alg=none", CMD_MAP.jwt.run({ rest: [none], c: plain }).includes("warning: alg=none"));
+    ok("jwt rejects non-JWT with usage", CMD_MAP.jwt.run({ rest: ["not-a-jwt"], c: plain }).includes("not a valid JWT"));
+  }
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));
