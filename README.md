@@ -4,6 +4,8 @@
 
 **A dependency-free security console for your terminal.**
 
+[![CI](https://github.com/SpartanKing18/sentinel-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/SpartanKing18/sentinel-cli/actions/workflows/ci.yml)
+
 ![License](https://img.shields.io/badge/license-MIT-00d4ff)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2b3b5c)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-339933)
