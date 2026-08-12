@@ -30,9 +30,10 @@ lib/
   entropy.js           Shannon entropy — flag high-entropy secrets/keys
   epoch.js             unix timestamp <-> ISO/UTC converter
   urlparse.js          URL breakdown (scheme/host/port/path/query/fragment)
-  base32.js            base32 (RFC 4648) encode/decode
+  base32.js            base32 (RFC 4648) encode/decode + raw bytes
+  totp.js              TOTP/HOTP 2FA codes (RFC 4226/6238)
 test/
-  run.js               framework-free unit suite (npm test) — 204 assertions
+  run.js               framework-free unit suite (npm test) — 213 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

@@ -24,6 +24,7 @@ const { shannon, assess } = require("../lib/entropy");
 const { convert: epochConvert } = require("../lib/epoch");
 const { parseUrl } = require("../lib/urlparse");
 const { base32encode, base32decode } = require("../lib/base32");
+const { hotp, totp, secondsRemaining } = require("../lib/totp");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -358,6 +359,21 @@ group("base32 (RFC 4648 test vectors)");
   ok("decode lowercase + spaces tolerated", base32decode("mzxw6===") === "foo");
   ok("round-trips arbitrary text", base32decode(base32encode("Sentinel/Nexus 42!")) === "Sentinel/Nexus 42!");
   ok("invalid char → null", base32decode("MZXW6!!!") === null);
+}
+
+group("TOTP / HOTP (RFC 4226 / 6238 test vectors)");
+{
+  const key = Buffer.from("12345678901234567890"); // RFC test key
+  ok("HOTP counter 0 → 755224", hotp(key, 0, 6) === "755224");
+  ok("HOTP counter 1 → 287082", hotp(key, 1, 6) === "287082");
+  ok("HOTP counter 2 → 359152", hotp(key, 2, 6) === "359152");
+  const secret = base32encode("12345678901234567890"); // base32 form of the RFC key
+  ok("TOTP T=59 (8-digit) → 94287082", totp(secret, { time: 59, digits: 8 }) === "94287082");
+  ok("TOTP T=1111111109 → 07081804", totp(secret, { time: 1111111109, digits: 8 }) === "07081804");
+  ok("TOTP T=20000000000 → 65353130", totp(secret, { time: 20000000000, digits: 8 }) === "65353130");
+  ok("TOTP 6-digit at T=59 → 287082", totp(secret, { time: 59 }) === "287082");
+  ok("TOTP invalid secret → null", totp("not base32!!!") === null && totp("") === null);
+  ok("secondsRemaining within a 30s step", secondsRemaining(30, 59) === 1 && secondsRemaining(30, 45) === 15);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
