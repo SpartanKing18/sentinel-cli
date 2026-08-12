@@ -23,8 +23,9 @@ lib/
   ollama.js            local-model client (chat, tags, coder-model pick)
   validate.js          .nexus/policy.json + team.json config validation
   text.js              pure text helpers (oneline, extractJson)
+  diff.js              frame reconciler + word-level intra-line diff
 test/
-  run.js               framework-free unit suite (npm test) — 128 assertions
+  run.js               framework-free unit suite (npm test) — 139 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

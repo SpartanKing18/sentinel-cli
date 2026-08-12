@@ -16,6 +16,7 @@ const { SETTINGS, describe } = require("../lib/settings");
 const { pickCoderModel } = require("../lib/ollama");
 const { validatePolicy, validateTeam } = require("../lib/validate");
 const { oneline, extractJson } = require("../lib/text");
+const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -232,6 +233,24 @@ group("text helpers");
   ok("extractJson from noisy text (obj)", extractJson("blah {\"a\":1} tail").a === 1);
   ok("extractJson array", Array.isArray(extractJson("x [1,2,3] y")) && extractJson("x [1,2,3] y")[2] === 3);
   ok("extractJson fallback on garbage", extractJson("no json here", "FB") === "FB");
+}
+
+group("render helpers (frameDiff + wordHi) — the trickiest pure algorithms");
+{
+  const E = "\x1b";
+  ok("frameDiff full redraw starts [H ends [J", frameDiff(null, ["a", "b", "c"], E).startsWith(E + "[H") && frameDiff(null, ["a"], E).endsWith(E + "[J"));
+  ok("frameDiff rewrites only the changed row", frameDiff(["a", "b", "c"], ["a", "X", "c"], E) === E + "[2;1HX" + E + "[K");
+  ok("frameDiff identical → empty", frameDiff(["a", "b"], ["a", "b"], E) === "");
+  ok("frameDiff row-count change → full", frameDiff(["a"], ["a", "b"], E).startsWith(E + "[H"));
+  ok("frameDiff two changes target rows 2 & 4", frameDiff(["a", "b", "c", "d"], ["a", "B", "c", "D"], E) === E + "[2;1HB" + E + "[K" + E + "[4;1HD" + E + "[K");
+  // wordHi (force color on for deterministic testing)
+  const [m1, p1] = wordHi("const total = 22;", "const total = 12;", true);
+  ok("wordHi marks the changed token bold+underline", m1.includes("\x1b[1;4;31m22") && p1.includes("\x1b[1;4;32m12"));
+  ok("wordHi dims carried tokens", m1.includes("\x1b[2;31mconst") && p1.includes("\x1b[2;32mtotal"));
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  ok("wordHi preserves the visible text", strip(m1) === "const total = 22;" && strip(p1) === "const total = 12;");
+  ok("wordHi with color off returns plain", JSON.stringify(wordHi("a x", "a y", false)) === JSON.stringify(["a x", "a y"]));
+  ok("diffTokens splits words/space/punct", JSON.stringify(diffTokens("a=1")) === JSON.stringify(["a", "=", "1"]));
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

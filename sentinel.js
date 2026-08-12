@@ -24,39 +24,7 @@ const A = { reset: "\x1b[0m", b: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", gr
 const p = (code, s) => (useColor ? code + s + A.reset : s);
 const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
 
-// Terminal frame reconciler: given the previous and next arrays of row strings,
-// return the minimal escape sequence to update the screen. If the row count is
-// unchanged (the steady state — bodyRows absorbs menu/input growth so the total
-// is always the terminal height) it rewrites ONLY the rows that differ; otherwise
-// it repaints in full. This is what makes streaming cheap: a growing reply changes
-// ~2 rows/frame, so we emit ~2 line updates instead of redrawing the whole screen.
-function frameDiff(prev, next, ESC) {
-  if (!prev || prev.length !== next.length) {
-    let s = ESC + "[H";
-    for (let i = 0; i < next.length; i++) s += next[i] + ESC + "[K" + (i < next.length - 1 ? "\r\n" : "");
-    return s + ESC + "[J";
-  }
-  let s = "";
-  for (let i = 0; i < next.length; i++) if (next[i] !== prev[i]) s += ESC + "[" + (i + 1) + ";1H" + next[i] + ESC + "[K";
-  return s;
-}
-// Word-level intra-line diff: split two lines into tokens (words / whitespace /
-// punctuation), find the common subsequence, and color the parts that actually
-// changed brighter than the parts that carried over — so an edited line shows
-// exactly which word changed, GitHub-style, instead of a flat red/green pair.
-function diffTokens(s) { return String(s).match(/\s+|[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g) || []; }
-function wordHi(a, b) {
-  if (!useColor) return [a, b];
-  const at = diffTokens(a), bt = diffTokens(b), n = at.length, m = bt.length;
-  const dp = []; for (let i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = at[i] === bt[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  const af = new Array(n).fill(true), bf = new Array(m).fill(true); // true = carried over (common)
-  let i = 0, j = 0;
-  while (i < n && j < m) { if (at[i] === bt[j]) { i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) { af[i++] = false; } else { bf[j++] = false; } }
-  while (i < n) af[i++] = false; while (j < m) bf[j++] = false;
-  const build = (toks, flags, common, changed) => { let s = ""; for (let k = 0; k < toks.length; k++) s += "\x1b[0m" + (flags[k] ? common : changed) + toks[k]; return s + "\x1b[0m"; };
-  return [build(at, af, "\x1b[2;31m", "\x1b[1;4;31m"), build(bt, bf, "\x1b[2;32m", "\x1b[1;4;32m")]; // dim=carried, bold+underline=changed
-}
+const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
