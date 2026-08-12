@@ -528,9 +528,7 @@ async function myIp() {
   catch (e) { return "error: " + (e.name === "AbortError" ? "timed out" : e.message); }
   finally { clearTimeout(t); }
 }
-const { statusInfo } = require("./lib/httpstatus"); // HTTP status map + classification (lib/httpstatus.js)
 const { DORK_BASE, dorkUrls } = require("./lib/dorks"); // google-dork catalog + URL builder (lib/dorks.js)
-function httpStatus(code) { const info = statusInfo(code); if (!info) return red("unknown status code (try 200, 404, 500...)"); return bold(cyan(info.code)) + " " + info.text + (info.class ? gray("  · " + info.class) : ""); }
 
 async function mainMenu() {
   banner();
@@ -653,7 +651,6 @@ async function cli(args) {
     else if (sub === "gist") await ghNewGist(rest[1], rest.slice(2).join(" "));
     else console.log("git clone|push|pull|status|log|diff|branch|checkout|repos|new|issues|prs|issue|pr|comment|gists|gist  (token: SENTINEL_GH_TOKEN)");
   }
-  else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log(revshell(lang, ip, port)); }
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "passphrase") { const n = /^\d+$/.test(rest[0] || "") ? +rest[0] : 4; console.log("  " + bold(cyan(genPassphrase(n))) + "  " + gray("(~" + passphraseBits(n) + " bits)")); }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
@@ -662,7 +659,6 @@ async function cli(args) {
   else if (cmd === "payloads") printPayloads(rest[0]);
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
-  else if (cmd === "status") console.log(httpStatus(rest[0]));
   else if (cmd === "ipinfo") await ipInfo(rest[0] || "");
   else if (cmd === "dorks") dorks(rest[0]);
   else if (cmd === "hashfile") fileHash(rest[0]);
