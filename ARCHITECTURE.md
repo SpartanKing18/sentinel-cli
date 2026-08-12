@@ -24,9 +24,10 @@ lib/
   validate.js          .nexus/policy.json + team.json config validation
   text.js              pure text helpers (oneline, extractJson)
   diff.js              frame reconciler + word-level intra-line diff
-  scanutil.js          security-console core: parsePorts, idHash, parseCve
+  scanutil.js          security-console core: parsePorts, idHash, parseCve, cidrCalc
+  loop.js              autonomous goal-loop controller (Nexus /loop)
 test/
-  run.js               framework-free unit suite (npm test) — 149 assertions
+  run.js               framework-free unit suite (npm test) — 165 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

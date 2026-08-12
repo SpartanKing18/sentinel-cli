@@ -25,6 +25,7 @@ const p = (code, s) => (useColor ? code + s + A.reset : s);
 const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
 
 const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
+const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -1665,7 +1666,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/secrets", "scan the repo for leaked credentials"], ["/scan", "quick TCP port scan of a host"], ["/notify", "bell + desktop alert on long turns"],
       ["/watch", "run a cmd; auto-fix & re-run until it passes"], ["/commit", "AI commit message + commit the diff"], ["/diff", "colored word-level diff · /diff <file> · /diff --staged"],
       ["/pin", "keep a file in context every turn"], ["/pins", "list pinned files"], ["/unpin", "remove a pinned file"], ["/redact", "mask secrets before cloud sends"],
-      ["/ensemble", "all engines answer, then synthesize the best"], ["/settings", "all options, neatly arranged (alias /options /config)"], ["/jobs", "background commands the agent started (run_background)"], ["/team", "multi-model workspace: architect + builder + reviewer, loops to PASS"], ["/policy", "show the enterprise security policy (org + local)"], ["/audit", "audited tool actions · /audit verify (tamper check)"], ["/bench", "speed / tokens / cost table per engine"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
+      ["/ensemble", "all engines answer, then synthesize the best"], ["/settings", "all options, neatly arranged (alias /options /config)"], ["/jobs", "background commands the agent started (run_background)"], ["/loop", "autonomous goal loop: /loop [-n rounds] <goal> until GOAL-DONE"], ["/team", "multi-model workspace: architect + builder + reviewer, loops to PASS"], ["/policy", "show the enterprise security policy (org + local)"], ["/audit", "audited tool actions · /audit verify (tamper check)"], ["/bench", "speed / tokens / cost table per engine"], ["/explain", "explain the diff or a file in plain English"], ["/test", "generate & run unit tests for a file"],
       ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
       ["/cowork", "strong model codes, weak model does cheap work"], ["/cheap", "max-savings preset (lean + low effort)"], ["/lean", "ask for minimal output (saves output tokens)"], ["/style", "output style: concise·explanatory·review·tdd·secure·teacher"], ["/effort", "claude thinking level: low|medium|high"], ["/estimate", "rough token/cost of a prompt before sending"], ["/fallback", "auto-switch model on rate-limit"],
@@ -2327,6 +2328,46 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/pins") transcript.push({ role: "system", text: pinned.size ? ("pinned files (in context every turn):\n" + [...pinned].map((f) => "  " + f).join("\n")) : "no pinned files — /pin <file> to add one" });
       else if (cmd === "/redact") { redact = !redact; transcript.push({ role: "system", text: "cloud redaction " + (redact ? "ON — secrets (API keys, tokens, private keys) are masked before anything is sent to a cloud engine (claude/opencode); local engine is unaffected" : "off") }); }
       else if (cmd === "/ensemble") { if (!argstr) transcript.push({ role: "system", text: "usage: /ensemble <prompt> — asks every engine, then synthesizes the single best answer" }); else ensembleEngines(argstr); }
+      else if (cmd === "/loop") {
+        let goal = argstr.trim(), maxRounds = 6;
+        const nm = goal.match(/(?:^|\s)-n\s+(\d+)\b/); if (nm) { maxRounds = clampRounds(nm[1], 6); goal = (goal.slice(0, nm.index) + " " + goal.slice(nm.index + nm[0].length)).trim(); }
+        if (!goal) { transcript.push({ role: "system", text: "autonomous goal loop — Nexus keeps taking the next step toward a goal until it's done or the round cap.\n  usage: /loop [-n rounds] <goal>   e.g. /loop -n 8 make every button use the shared design tokens\n  the agent ends with GOAL-DONE when complete; stop early with ctrl+c." }); }
+        else {
+          const block = { role: "nexus", items: [] }; transcript.push(block);
+          block.items.push({ type: "text", full: bold("Autonomous loop") + gray("  ·  " + engine + "  ·  up to " + maxRounds + " rounds  ·  ") + cyan(goal), shown: 0 });
+          busy = true; busyStart = Date.now(); busyWord = "Looping"; ctl = makeCtl(); scroll = 0; startTick(); render();
+          const runStep = async (prompt) => {
+            try {
+              if (engine === "ollama") { const m = (sess.model && sess.model !== engine) ? sess.model : pickCoderModel(await ollamaTags()); const res = await ollamaExec(m, prompt, "", cwd, aSignal(ctl)); return (res.output || "").trim(); }
+              const mdl = (sess.model && sess.model !== engine) ? sess.model : undefined;
+              const res = await runEngineTask(engine, prompt, cwd, true, false, null, ctl, mdl);
+              let out = (res.output || "").trim(); const proto = ENGINES[engine] && ENGINES[engine].proto;
+              if (proto === "gemini-json") { const p = geminiParse(out); if (p && p.text) out = p.text; }
+              else if (proto === "codex-json") { const p = codexParse(out); if (p && p.text) out = p.text; }
+              return out;
+            } catch (e) { return "(error: " + (e && e.message || e) + ")"; }
+          };
+          (async () => {
+            let round = 0, lastNote = "", stopReason = "";
+            try {
+              while (round < maxRounds) {
+                if (ctl && ctl.stopped) { stopReason = "interrupted"; break; }
+                round++;
+                const card = { type: "tool", id: "lp" + round, name: "Task", label: "round " + round + "/" + maxRounds + " (" + engine + ")", status: "run", start: Date.now() };
+                block.items.push(card); render();
+                const out = await runStep(loopPrompt(goal, round, maxRounds, lastNote));
+                card.status = "ok"; card.end = Date.now();
+                block.items.push({ type: "text", full: "\n" + bold(cyan("round " + round)) + "\n" + out.slice(0, 2000), shown: 0 }); render();
+                const d = loopDecision(round, maxRounds, out); lastNote = out.slice(-1200);
+                if (d.stop) { stopReason = d.reason; break; }
+              }
+            } catch (e) { block.items.push({ type: "text", full: red("\nloop error: " + (e && e.message || e)), shown: 0 }); }
+            block.summary = "loop: " + round + " round" + (round === 1 ? "" : "s") + "  ·  " + (stopReason || "done") + "  ·  " + ((Date.now() - busyStart) / 1000).toFixed(0) + "s";
+            if (policy.audit) auditLog(cwd, { engine: "loop", tool: "loop_run", status: (ctl && ctl.stopped) ? "interrupted" : "ok", rounds: round, reason: stopReason });
+            busy = false; ctl = null; try { saveSession(); } catch (_) {} maybeAutoCompact(); render();
+          })();
+        }
+      }
       else if (cmd === "/team") {
         const task = argstr.trim();
         if (!task) { transcript.push({ role: "system", text: "multi-model workspace — an architect plans, a builder implements, an independent reviewer checks; each role can be a different model.\n  usage: /team <task>\n  configure roles in .nexus/team.json:  {\"roles\":[{\"role\":\"architect\",\"engine\":\"claude\"},{\"role\":\"builder\",\"engine\":\"codex\",\"model\":\"gpt-5-codex\"},{\"role\":\"reviewer\",\"engine\":\"gemini\"}]}\n  default picks distinct available engines so the reviewer is genuinely independent." }); }

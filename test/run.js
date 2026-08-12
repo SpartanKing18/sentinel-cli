@@ -18,6 +18,7 @@ const { validatePolicy, validateTeam } = require("../lib/validate");
 const { oneline, extractJson } = require("../lib/text");
 const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
 const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/scanutil");
+const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -277,6 +278,18 @@ group("security console core (scan/hash/cve)");
   ok("cidr /32 → 1 host", cidrCalc("10.0.0.5/32").hosts === 1 && cidrCalc("10.0.0.5/32").network === "10.0.0.5");
   ok("cidr /0 → whole space", cidrCalc("0.0.0.0/0").netmask === "0.0.0.0" && cidrCalc("0.0.0.0/0").broadcast === "255.255.255.255");
   ok("cidr invalid → null", cidrCalc("not-a-cidr") === null && cidrCalc("192.168.1.0/33") === null && cidrCalc("999.1.1.1/24") === null);
+}
+
+group("autonomous loop controller (Nexus /loop)");
+{
+  ok("continues mid-loop", loopDecision(2, 6, "did some work").stop === false);
+  ok("stops on GOAL-DONE token", loopDecision(2, 6, "all set. " + DONE_TOKEN).stop === true && loopDecision(2, 6, "x " + DONE_TOKEN).reason === "goal complete");
+  ok("stops at the round cap", loopDecision(6, 6, "more to do").stop === true && /limit/.test(loopDecision(6, 6, "x").reason));
+  ok("DONE detection is case-insensitive", loopDecision(1, 6, "done: goal-done").stop === true);
+  ok("clampRounds default", clampRounds(undefined, 6) === 6 && clampRounds("abc", 6) === 6);
+  ok("clampRounds bounds 1..20", clampRounds(0) === 1 && clampRounds(999) === 20 && clampRounds("3") === 3);
+  ok("loopPrompt includes goal + round + done token", loopPrompt("ship the CSS", 2, 5, "").includes("ship the CSS") && loopPrompt("g", 2, 5, "").includes("2/5") && loopPrompt("g", 1, 5, "").includes(DONE_TOKEN));
+  ok("loopPrompt threads the previous note", loopPrompt("g", 3, 5, "prev output").includes("prev output"));
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
