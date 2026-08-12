@@ -475,6 +475,21 @@ group("no dead lib imports in sentinel.js");
   eq("every destructured lib import is used", dead, []);
 }
 
+group("hashing + password gen");
+{
+  const { ALGOS, GENPASS_CHARS, digests, genPass } = require("../lib/hashing");
+  const m = Object.fromEntries(digests("abc"));
+  eq("algo order", ALGOS, ["md5", "sha1", "sha256", "sha512"]);
+  eq("md5('abc') vector", m.md5, "900150983cd24fb0d6963f7d28e17f72");
+  eq("sha256('abc') vector", m.sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  ok("digests returns [algo, hex] pairs for every algo", digests("x").length === 4 && digests("x").every((r) => r.length === 2 && /^[0-9a-f]+$/.test(r[1])));
+  ok("genPass clamps length to [8,128]", genPass("1").length === 8 && genPass("999").length === 128 && genPass("").length === 20 && genPass("abc").length === 20);
+  // deterministic with injected rng: bytes = [0,1,2,...] -> chars[0], chars[1], ...
+  const fakeRng = (n) => Buffer.from(Array.from({ length: n }, (_, i) => i));
+  eq("genPass deterministic with injected rng", genPass(10, fakeRng), GENPASS_CHARS.slice(0, 10));
+  ok("genPass only uses the declared charset", genPass(128, fakeRng).split("").every((ch) => GENPASS_CHARS.includes(ch)));
+}
+
 group("cheat-sheets");
 {
   const { CHEATS, cheatTopics } = require("../lib/cheats");

@@ -32,6 +32,7 @@ const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib
 
 // ---------- data ----------
 const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
+const { digests, genPass } = require("./lib/hashing"); // hash digests + password gen (lib/hashing.js)
 const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
 const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
 const { parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
@@ -131,7 +132,7 @@ const ENC = {
   base32e: (s) => base32encode(s),
   base32d: (s) => { const r = base32decode(s); return r == null ? "(invalid base32)" : r; },
 };
-function hashes(s) { return ["md5", "sha1", "sha256", "sha512"].map((a) => "  " + a.padEnd(8) + cyan(crypto.createHash(a).update(s).digest("hex"))).join("\n"); }
+function hashes(s) { return digests(s).map(([a, hex]) => "  " + a.padEnd(8) + cyan(hex)).join("\n"); }
 
 // ---------- recon: DNS / WHOIS / headers ----------
 async function dnsLookup(host) {
@@ -521,13 +522,6 @@ function printPayloads(cls) {
 }
 
 // ---------- utilities: password gen, public IP, HTTP status ----------
-function genPass(len) {
-  len = Math.max(8, Math.min(128, parseInt(len, 10) || 20));
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+";
-  const bytes = crypto.randomBytes(len); let out = "";
-  for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
-  return out;
-}
 async function myIp() {
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
   try { const r = await fetch("https://api.ipify.org?format=json", { signal: ctrl.signal }); const d = await r.json(); return d.ip || "(unknown)"; }
