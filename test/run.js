@@ -7,6 +7,8 @@ const { geminiParse, codexParse } = require("../lib/parsers");
 const { POLICY_DEFAULTS, globToRe, pathMatchesAny, policyCheck, auditLog, auditVerify } = require("../lib/policy");
 const { ENGINES, ENGINE_ORDER, engineCap } = require("../lib/engines");
 const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("../lib/security");
+const { styleNames, styleDirective } = require("../lib/styles");
+const { mergeMemory } = require("../lib/memory");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -87,6 +89,27 @@ group("security (secrets + destructive-command preflight)");
   ok("classifyDanger npm test → ok", classifyDanger("npm test").level === "ok");
   ok("compactOutput trims long text", compactOutput("x".repeat(9000), 4000).length < 9000);
   ok("compactOutput keeps short text", compactOutput("short", 4000) === "short");
+}
+
+group("output styles (Claude-Code idea)");
+{
+  ok("default → empty directive", styleDirective("default") === "");
+  ok("unknown → empty directive", styleDirective("nope") === "");
+  ok("concise has a directive", styleDirective("concise").length > 0);
+  ok("names include review/tdd/secure", ["review", "tdd", "secure"].every((n) => styleNames().includes(n)));
+}
+
+group("agent memory / remember (Glitch idea) — dedup");
+{
+  let r = mergeMemory("# Nexus\n", "Use the shared Table component at src/Table.tsx");
+  ok("adds a new fact", r.added === true && /## Remembered/.test(r.md) && /Table component/.test(r.md));
+  const r2 = mergeMemory(r.md, "use the shared table component at src/Table.tsx");
+  ok("dedups (case/punct-insensitive)", r2.added === false);
+  const r3 = mergeMemory(r.md, "Use the shared Table component");
+  ok("dedups a substring", r3.added === false);
+  ok("rejects too-short", mergeMemory("", "ok").added === false);
+  const r4 = mergeMemory(r.md, "Always run npm test before pushing");
+  ok("adds a distinct fact", r4.added === true && /npm test/.test(r4.md));
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
