@@ -424,6 +424,19 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("no dead lib imports in sentinel.js");
+{
+  const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
+  const imported = new Set();
+  for (const m of src.matchAll(/const \{([^}]*)\} = require\("\.\/lib\/[^"]+"\)/g))
+    m[1].split(",").forEach((n) => { n = n.trim().split(":").pop().trim(); if (n) imported.add(n); });
+  const dead = [...imported].filter((n) => {
+    const re = new RegExp("\\b" + n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
+    return (src.match(re) || []).length === 1; // only the import itself
+  });
+  eq("every destructured lib import is used", dead, []);
+}
+
 group("cheat-sheets");
 {
   const { CHEATS, cheatTopics } = require("../lib/cheats");

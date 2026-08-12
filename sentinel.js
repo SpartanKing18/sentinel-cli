@@ -24,7 +24,7 @@ const A = { reset: "\x1b[0m", b: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", gr
 const p = (code, s) => (useColor ? code + s + A.reset : s);
 const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
 
-const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
+const { frameDiff, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
 const { defang, refang } = require("./lib/ioc"); // IOC defang/refang tool (lib/ioc.js)
 const { assess: entropyAssess } = require("./lib/entropy"); // Shannon entropy tool (lib/entropy.js)
@@ -38,8 +38,8 @@ const { parseUA } = require("./lib/useragent"); // User-Agent parser (lib/userag
 // ---------- data ----------
 const { SERVICES, portLookup } = require("./lib/ports"); // port<->service map + lookup (lib/ports.js)
 const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // diceware passphrase (lib/passphrase.js)
-const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
-const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, inCidr } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
+const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
+const { parsePorts, idHash, parseCve, cidrCalc, inCidr } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const { SHELLS, revshell } = require("./lib/revshell"); // reverse-shell payloads (lib/revshell.js)
 
@@ -1293,7 +1293,7 @@ function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try 
 // write blocking, and a tamper-evident audit trail. Local-agent tool calls are
 // enforced hard (we execute them); the cloud engine gets the policy injected into
 // its system prompt plus the existing plan-mode / disallowed-tools controls.
-const { POLICY_DEFAULTS, globToRe, pathMatchesAny, policyCheck, auditLog, auditVerify } = require("./lib/policy"); // guardrails engine (lib/policy.js)
+const { POLICY_DEFAULTS, policyCheck, auditLog, auditVerify } = require("./lib/policy"); // guardrails engine (lib/policy.js)
 const { validatePolicy, validateTeam } = require("./lib/validate"); // config validation (lib/validate.js)
 // Read + validate the raw .nexus/policy.json and ~/.sentinel/policy.json; returns warning strings.
 function policyWarnings(cwd) { const fs = require("fs"), path = require("path"); const w = []; for (const [label, p] of [["local .nexus/policy.json", path.join(cwd, ".nexus", "policy.json")], ["org ~/.sentinel/policy.json", path.join(sentinelHome(), "policy.json")]]) { let raw; try { raw = fs.readFileSync(p, "utf8"); } catch (_) { continue; } let obj; try { obj = JSON.parse(raw); } catch (e) { w.push(label + ": invalid JSON (" + e.message + ")"); continue; } for (const m of validatePolicy(obj)) w.push(label + ": " + m); } return w; }
@@ -1419,7 +1419,7 @@ async function deviceTool(name, a, cwd) {
 // ---------- cost-aware model tiering for /cowork ----------
 // Rough Claude price table ($ per 1M tokens: input, output). Used only to ESTIMATE
 // whether delegating a task to a cheaper model saves more than the delegation overhead.
-const { MODEL_PRICE, priceOf, isMechanical, shouldDelegate } = require("./lib/pricing"); // cost model (lib/pricing.js)
+const { priceOf, isMechanical, shouldDelegate } = require("./lib/pricing"); // cost model (lib/pricing.js)
 // Sentinel preflight — classify a shell command's destructive intent (inspired by Glitch's
 // Sentinel, improved: names the matched rule, covers pipe-to-shell + fork bombs, 3 levels).
 const { oneline, extractJson } = require("./lib/text"); // pure text helpers (lib/text.js)
