@@ -2692,14 +2692,20 @@ function usage() {
     sentinel [command] [args]         no command opens the interactive menu
 
   ${bold("COMMANDS")}
+    ${cyan("AI & Nexus")}
+    nexus [opts] [task]               Nexus AI coder chat: -e claude|gemini|codex|opencode|aider|ollama, -y skip prompts, --print headless
+    nexus run "<goal>" [opts]         autonomous multi-level runner: -e engine, --overnight, --until, --resume
     init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
     docs [topic]                      built-in Nexus documentation (docs all for everything)
+
+    ${cyan("Setup & security")}
     doctor                            health check: engines, Ollama, policy, audit chain
     policy [init|--json]              show/scaffold the security policy (init writes a starter .nexus/policy.json)
     audit [verify|--json]             show the audit trail; 'verify' checks the hash chain (exit 1 if tampered)
     login [google|github|<code>]      sign in (paste your code from the website Settings)
-    nexus [opts] [task]               Nexus AI coder chat: -e claude|gemini|codex|opencode|aider|ollama, -y skip prompts, --print headless
-    nexus run "<goal>" [opts]         autonomous multi-level runner: -e engine, --overnight, --until, --resume
+    setup <tool>                      auto-configure a tool on first use
+
+    ${cyan("Recon")}
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
     dns <domain>                      A / AAAA / MX / NS / TXT / CNAME + reverse
     whois <domain|ip>                 native WHOIS lookup
@@ -2708,6 +2714,38 @@ function usage() {
     subs <domain>                     passive subdomain enum (crt.sh)
     cve <keyword | CVE-id>            search the NVD vulnerability database
     fuzz <url> [wordlist]             directory / content brute-forcer
+
+    ${cyan("Offensive")}
+    revshell <lang> <ip> <port>       reverse-shell one-liner
+    serve [port] [dir]                HTTP file server for payload delivery (default 8000)
+    listen [port]                     TCP listener to catch a reverse shell (default 4444)
+    payloads [class]                  payload library (sqli, xss, lfi, cmdi, ssti, ssrf)
+    lab [target]                      practice targets (dvwa, juice, webgoat, bwapp, mutillidae)
+
+    ${cyan("Encoding & hashing")}
+    encode <b64|hex|url|base32> <text>  encode text
+    decode <b64|hex|url|base32> <text>  decode text
+    hash <text>                       md5 / sha1 / sha256 / sha512
+    hashfile <file>                   md5 / sha1 / sha256 / sha512 of a file
+    hashid <hash>                     identify a hash type
+    genpass [length]                  generate a strong random password (default 20)
+    defang <ioc>                      neutralize a URL/IP/email for safe pasting (hxxp, [.])
+    refang <text>                     reverse defang
+
+    ${cyan("Network & analysis")}
+    entropy <string>                  Shannon entropy — flag high-entropy secrets/keys
+    epoch [ts|date]                   unix timestamp <-> ISO/UTC (no arg = now)
+    incidr <ip> <cidr>                is an IP inside a CIDR range? (firewall/allowlist checks)
+    url <url>                         break a URL into scheme/host/port/path/query/fragment
+    cidr <a.b.c.d/xx>                 subnet calculator (range, hosts, mask)
+    jwt <token>                       decode a JWT header + payload
+    dorks <domain>                    print Google dork search URLs for a domain
+    uuid                              generate a random UUID v4
+    myip                              show your public IP address
+    ipinfo <ip>                       geolocate an IP (city, ISP, ASN)
+    status <code>                     look up an HTTP status code
+
+    ${cyan("Git")}
     git clone <url>                   clone a repo (SENTINEL_GH_TOKEN for private)
     git push [message]                commit all changes + push
     git pull                          pull the latest changes
@@ -2725,33 +2763,10 @@ function usage() {
     git comment <owner/repo> <n> "…"  comment on an issue/PR
     git gists                         list your gists
     git gist <file> [description]     create a gist from a file
-    revshell <lang> <ip> <port>       reverse-shell one-liner
-    encode <b64|hex|url|base32> <text> encode text
-    defang <ioc>                      neutralize a URL/IP/email for safe pasting (hxxp, [.])
-    refang <text>                     reverse defang
-    entropy <string>                  Shannon entropy — flag high-entropy secrets/keys
-    epoch [ts|date]                   unix timestamp <-> ISO/UTC (no arg = now)
-    incidr <ip> <cidr>                is an IP inside a CIDR range? (firewall/allowlist checks)
-    url <url>                         break a URL into scheme/host/port/path/query/fragment
-    decode <b64|hex|url|base32> <text> decode text
-    hash <text>                       md5 / sha1 / sha256 / sha512
-    hashid <hash>                     identify a hash type
-    genpass [length]                  generate a strong random password (default 20)
-    uuid                              generate a random UUID v4
-    myip                              show your public IP address
-    ipinfo <ip>                       geolocate an IP (city, ISP, ASN)
-    status <code>                     look up an HTTP status code
-    cidr <a.b.c.d/xx>                 subnet calculator (range, hosts, mask)
-    jwt <token>                       decode a JWT header + payload
-    dorks <domain>                    print Google dork search URLs for a domain
-    hashfile <file>                   md5 / sha1 / sha256 / sha512 of a file
-    serve [port] [dir]                HTTP file server for payload delivery (default 8000)
-    listen [port]                     TCP listener to catch a reverse shell (default 4444)
-    lab [target]                      practice targets (dvwa, juice, webgoat, bwapp, mutillidae)
-    payloads [class]                  payload library (sqli, xss, lfi, cmdi, ssti, ssrf)
+
+    ${cyan("Reference")}
     cheats [topic]                    ${Object.keys(CHEATS).join(", ")}
     tools                             tool catalog + install commands
-    setup <tool>                      auto-configure a tool on first use
 
   ${bold("OPTIONS")}
     -h, --help                        show this help
