@@ -19,6 +19,7 @@ const { oneline, extractJson } = require("../lib/text");
 const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
 const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/scanutil");
 const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
+const { defang, refang } = require("../lib/ioc");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -290,6 +291,17 @@ group("autonomous loop controller (Nexus /loop)");
   ok("clampRounds bounds 1..20", clampRounds(0) === 1 && clampRounds(999) === 20 && clampRounds("3") === 3);
   ok("loopPrompt includes goal + round + done token", loopPrompt("ship the CSS", 2, 5, "").includes("ship the CSS") && loopPrompt("g", 2, 5, "").includes("2/5") && loopPrompt("g", 1, 5, "").includes(DONE_TOKEN));
   ok("loopPrompt threads the previous note", loopPrompt("g", 3, 5, "prev output").includes("prev output"));
+}
+
+group("IOC defang / refang tool");
+{
+  ok("defang neutralizes scheme + dots", defang("http://evil.com") === "hxxp[://]evil[.]com");
+  ok("defang https + email", defang("https://a.b/c") === "hxxps[://]a[.]b/c" && defang("bad@evil.com") === "bad[@]evil[.]com");
+  ok("defang an IP", defang("8.8.8.8") === "8[.]8[.]8[.]8");
+  ok("refang reverses defang", refang("hxxp[://]evil[.]com") === "http://evil.com");
+  const original = "https://evil.example.com/path?u=admin@corp.com and 10.0.0.1";
+  ok("defang -> refang round-trips", refang(defang(original)) === original);
+  ok("refang tolerates plain hxxp://", refang("hxxp://x[.]y") === "http://x.y");
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");

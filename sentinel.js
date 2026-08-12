@@ -26,6 +26,7 @@ const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A
 
 const { frameDiff, diffTokens, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
 const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
+const { defang, refang } = require("./lib/ioc"); // IOC defang/refang tool (lib/ioc.js)
 
 // ---------- data ----------
 const SERVICES = { 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http", 110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps", 587: "smtp", 636: "ldaps", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 2049: "nfs", 2375: "docker", 3306: "mysql", 3389: "rdp", 4444: "metasploit", 5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 8888: "http-alt", 9200: "elastic", 11211: "memcached", 27017: "mongodb" };
@@ -692,6 +693,8 @@ async function cli(args) {
   }
   else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log((SHELLS[lang] || SHELLS.bash)(ip, port)); }
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url)"); }
+  else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
+  else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "hashid") console.log(idHash(rest.join(" ")));
   else if (cmd === "lab") { if (rest[0]) labOne(rest[0]); else labList(); }
@@ -2714,6 +2717,8 @@ function usage() {
     git gist <file> [description]     create a gist from a file
     revshell <lang> <ip> <port>       reverse-shell one-liner
     encode <b64|hex|url> <text>       encode text
+    defang <ioc>                      neutralize a URL/IP/email for safe pasting (hxxp, [.])
+    refang <text>                     reverse defang
     decode <b64|hex|url> <text>       decode text
     hash <text>                       md5 / sha1 / sha256 / sha512
     hashid <hash>                     identify a hash type
