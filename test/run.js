@@ -424,6 +424,18 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("google dork builder");
+{
+  const { DORK_BASE, DORKS, dorkUrls } = require("../lib/dorks");
+  ok("catalog non-empty [label, query] pairs", DORKS.length >= 5 && DORKS.every((d) => d.length === 2 && d[0] && d[1]));
+  const rows = dorkUrls("example.com");
+  ok("one row per dork", rows.length === DORKS.length);
+  eq("first row encodes site: query", rows[0], { label: "exposed files", query: 'intitle:"index of"', encoded: encodeURIComponent('site:example.com intitle:"index of"'), url: DORK_BASE + encodeURIComponent('site:example.com intitle:"index of"') });
+  ok("every url = base + encoded", rows.every((r) => r.url === DORK_BASE + r.encoded));
+  ok("domain is URL-encoded into the query", dorkUrls("a b.com")[0].encoded.includes(encodeURIComponent("site:a b.com ")));
+  ok("empty domain does not throw", dorkUrls("").length === DORKS.length && dorkUrls(null).length === DORKS.length);
+}
+
 group("http status reference");
 {
   const { HTTP_STATUS_MAP, statusClass, statusInfo } = require("../lib/httpstatus");

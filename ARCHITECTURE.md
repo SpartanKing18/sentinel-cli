@@ -39,8 +39,9 @@ lib/
   reference.js         --help command catalog (single source of truth) + renderer
   revshell.js          reverse-shell one-liner payloads (pure, exact-output tested)
   httpstatus.js        HTTP status-code map + classification (pure lookup)
+  dorks.js             google-dork catalog + URL builder (pure, tested)
 test/
-  run.js               framework-free unit suite (npm test) — 261 assertions
+  run.js               framework-free unit suite (npm test) — 267 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

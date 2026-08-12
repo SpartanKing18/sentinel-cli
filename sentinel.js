@@ -555,6 +555,7 @@ async function myIp() {
   finally { clearTimeout(t); }
 }
 const { statusInfo } = require("./lib/httpstatus"); // HTTP status map + classification (lib/httpstatus.js)
+const { DORK_BASE, dorkUrls } = require("./lib/dorks"); // google-dork catalog + URL builder (lib/dorks.js)
 function httpStatus(code) { const info = statusInfo(code); if (!info) return red("unknown status code (try 200, 404, 500...)"); return bold(cyan(info.code)) + " " + info.text + (info.class ? gray("  · " + info.class) : ""); }
 
 async function mainMenu() {
@@ -633,9 +634,8 @@ async function ipInfo(ip) {
 }
 function dorks(domain) {
   if (!domain) { console.log(red("usage: sentinel dorks example.com")); return; }
-  const D = [["exposed files", 'intitle:"index of"'], ["config/env", "ext:env | ext:ini | ext:conf"], ["SQL dumps", "ext:sql"], ["login pages", "inurl:login | inurl:admin"], ["docs", "ext:pdf | ext:xls | ext:docx"], ["errors", 'intext:"sql syntax near"'], ["backups", "ext:bak | ext:old | ext:backup"]];
   h1("Google dorks for " + domain);
-  D.forEach(([label, q]) => { console.log("  " + bold(label)); console.log("  " + gray("https://www.google.com/search?q=") + encodeURIComponent("site:" + domain + " " + q) + "\n"); });
+  dorkUrls(domain).forEach((d) => { console.log("  " + bold(d.label)); console.log("  " + gray(DORK_BASE) + d.encoded + "\n"); });
 }
 function fileHash(f) {
   try { const buf = require("fs").readFileSync(f); h1("Hashes of " + f); ["md5", "sha1", "sha256", "sha512"].forEach((a) => console.log("  " + a.padEnd(8) + cyan(crypto.createHash(a).update(buf).digest("hex")))); }
