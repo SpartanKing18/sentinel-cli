@@ -37,8 +37,9 @@ lib/
   ports.js             port <-> service map + bidirectional lookup
   passphrase.js        diceware memorable-passphrase generator (injectable rng)
   reference.js         --help command catalog (single source of truth) + renderer
+  revshell.js          reverse-shell one-liner payloads (pure, exact-output tested)
 test/
-  run.js               framework-free unit suite (npm test) — 249 assertions
+  run.js               framework-free unit suite (npm test) — 255 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

