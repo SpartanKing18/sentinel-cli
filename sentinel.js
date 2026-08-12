@@ -782,6 +782,15 @@ async function cli(args) {
   }
   else if (cmd === "logout") console.log(nexusLogout() ? "  " + green("signed out.") : "  " + gray("was not signed in."));
   else if (cmd === "whoami") { const a = nexusAuth(); console.log(a ? "  " + (a.name || a.email || a.uid) + gray("  " + String(a.provider).replace(".com", "")) : "  " + gray("not signed in")); }
+  else if (cmd === "policy") {
+    const p = loadPolicy(process.cwd());
+    if (rest[0] === "--json") { console.log(JSON.stringify(p, null, 2)); }
+    else { banner(); h1("Effective security policy" + (p.org ? "  (ORG-ENFORCED)" : "")); const row = (k, v) => console.log("  " + k.padEnd(22) + v); row("source", p.org ? "org floor (~/.sentinel/policy.json) + local .nexus/policy.json" : ".nexus/policy.json (or defaults)"); row("protected paths", (p.protectedPaths || []).length + "  " + gray((p.protectedPaths || []).slice(0, 6).join(", ") + ((p.protectedPaths || []).length > 6 ? " …" : ""))); row("denied commands", (p.deniedCommands || []).length ? p.deniedCommands.join(", ") : gray("(built-in destructive guard only)")); row("max files / turn", p.maxFilesPerTurn || gray("unlimited")); row("block secret writes", p.blockSecrets ? green("on") : red("off")); row("network", p.allowNetwork ? "allowed" : red("blocked")); row("audit", p.audit ? "on (.nexus/audit.jsonl, hash-chained)" : gray("off")); console.log("\n  " + gray("machine-readable: ") + cyan("sentinel policy --json") + "\n"); }
+  }
+  else if (cmd === "audit") {
+    if (rest[0] === "verify") { const v = auditVerify(process.cwd()); if (v.empty) { console.log("  " + gray("audit trail is empty — nothing to verify")); process.exit(0); } console.log(v.ok ? "  " + green("OK") + " audit trail intact — " + v.count + " record(s), hash chain verified" : "  " + red("TAMPERED") + " — " + v.reason + " at record #" + v.badLine + " of " + v.count); process.exit(v.ok ? 0 : 1); } // CI gate: non-zero exit on tamper
+    else { try { const fs = require("fs"), path = require("path"); const raw = fs.readFileSync(path.join(process.cwd(), ".nexus", "audit.jsonl"), "utf8").trim().split("\n").filter(Boolean); const show = (rest[0] === "--json") ? raw.slice(-50).join("\n") : raw.slice(-20).map((l) => { try { const e = JSON.parse(l); return "  " + gray((e.ts || "").slice(0, 19).replace("T", " ")) + " " + (e.status === "blocked" ? red("blocked") : e.status === "error" ? yellow("error  ") : green("ok     ")) + " " + (e.tool || "") + gray(" " + (e.path || e.cmd || "") + (e.reason ? " — " + e.reason : "")); } catch (_) { return ""; } }).filter(Boolean).join("\n"); const v = auditVerify(process.cwd()); console.log(show + "\n  " + (v.ok ? green("chain verified (" + v.count + ")") : red("CHAIN BROKEN — sentinel audit verify"))); } catch (_) { console.log("  " + gray("no audit trail (.nexus/audit.jsonl) in this directory")); } }
+  }
   else if (cmd === "nexus" || cmd === "code" || cmd === "ai") {
     const sub = (rest[0] || "").toLowerCase();
     if (sub === "init") nexusInit();
@@ -2673,6 +2682,9 @@ function usage() {
   ${bold("COMMANDS")}
     init                              scaffold Nexus in this project (.nexus/NEXUS.md + config)
     docs [topic]                      built-in Nexus documentation (docs all for everything)
+    policy [--json]                   show the effective security policy (org floor + local)
+    audit [verify|--json]             show the audit trail; 'verify' checks the hash chain (exit 1 if tampered)
+    login [google|github|<code>]      sign in (paste your code from the website Settings)
     nexus [opts] [task]               Nexus AI coder chat: -e claude|gemini|codex|opencode|aider|ollama, -y skip prompts, --print headless
     nexus run "<goal>" [opts]         autonomous multi-level runner: -e engine, --overnight, --until, --resume
     scan <host> [ports]               TCP scan (ports: top | 1-1024 | 80,443)
