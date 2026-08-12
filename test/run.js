@@ -17,7 +17,7 @@ const { pickCoderModel } = require("../lib/ollama");
 const { validatePolicy, validateTeam } = require("../lib/validate");
 const { oneline, extractJson } = require("../lib/text");
 const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
-const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/scanutil");
+const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, ipToInt, inCidr } = require("../lib/scanutil");
 const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
 const { defang, refang } = require("../lib/ioc");
 const { shannon, assess } = require("../lib/entropy");
@@ -281,6 +281,13 @@ group("security console core (scan/hash/cve)");
   ok("cidr /32 → 1 host", cidrCalc("10.0.0.5/32").hosts === 1 && cidrCalc("10.0.0.5/32").network === "10.0.0.5");
   ok("cidr /0 → whole space", cidrCalc("0.0.0.0/0").netmask === "0.0.0.0" && cidrCalc("0.0.0.0/0").broadcast === "255.255.255.255");
   ok("cidr invalid → null", cidrCalc("not-a-cidr") === null && cidrCalc("192.168.1.0/33") === null && cidrCalc("999.1.1.1/24") === null);
+  // ip-in-cidr membership
+  ok("ipToInt round values", ipToInt("0.0.0.0") === 0 && ipToInt("255.255.255.255") === 4294967295 && ipToInt("256.0.0.0") === null);
+  ok("inCidr inside /24", inCidr("192.168.1.50", "192.168.1.0/24") === true);
+  ok("inCidr outside /24", inCidr("192.168.2.1", "192.168.1.0/24") === false);
+  ok("inCidr boundary /25", inCidr("10.0.0.130", "10.0.0.128/25") === true && inCidr("10.0.0.127", "10.0.0.128/25") === false);
+  ok("inCidr /0 matches all", inCidr("8.8.8.8", "0.0.0.0/0") === true);
+  ok("inCidr invalid → null", inCidr("bad", "192.168.1.0/24") === null && inCidr("1.2.3.4", "nope") === null);
 }
 
 group("autonomous loop controller (Nexus /loop)");

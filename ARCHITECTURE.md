@@ -24,13 +24,13 @@ lib/
   validate.js          .nexus/policy.json + team.json config validation
   text.js              pure text helpers (oneline, extractJson)
   diff.js              frame reconciler + word-level intra-line diff
-  scanutil.js          security-console core: parsePorts, idHash, parseCve, cidrCalc
+  scanutil.js          security-console core: parsePorts, idHash, parseCve, cidrCalc, inCidr
   loop.js              autonomous goal-loop controller (Nexus /loop)
   ioc.js               IOC defang / refang (safe-to-paste indicators)
   entropy.js           Shannon entropy — flag high-entropy secrets/keys
   epoch.js             unix timestamp <-> ISO/UTC converter
 test/
-  run.js               framework-free unit suite (npm test) — 184 assertions
+  run.js               framework-free unit suite (npm test) — 190 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
