@@ -424,6 +424,23 @@ group("port <-> service lookup");
   ok("empty → null", portLookup("") === null);
 }
 
+group("command registry (batch 1)");
+{
+  const { CMDS, CMD_MAP } = require("../lib/registry");
+  const plain = { red: (s) => s, green: (s) => s, yellow: (s) => s, cyan: (s) => s, gray: (s) => s, bold: (s) => s };
+  ok("names + aliases are unique", (() => { const seen = new Set(); for (const cmd of CMDS) { for (const n of [cmd.name, ...(cmd.aliases || [])]) { if (seen.has(n)) return false; seen.add(n); } } return true; })());
+  ok("every run() returns a string", CMDS.every((cmd) => typeof cmd.run({ rest: [], c: plain }) === "string"));
+  ok("aliases resolve to the same entry", CMD_MAP.inrange === CMD_MAP.incidr);
+  eq("defang output matches", CMD_MAP.defang.run({ rest: ["http://evil.com/path"], c: plain }), "hxxp[://]evil[.]com/path");
+  eq("incidr yes", CMD_MAP.incidr.run({ rest: ["10.0.0.5", "10.0.0.0/24"], c: plain }), "  yes — 10.0.0.5 is inside 10.0.0.0/24");
+  eq("incidr no", CMD_MAP.incidr.run({ rest: ["10.0.9.9", "10.0.0.0/24"], c: plain }), "  no — 10.0.9.9 is NOT inside 10.0.0.0/24");
+  ok("entropy usage on empty", CMD_MAP.entropy.run({ rest: [], c: plain }).includes("usage: sentinel entropy"));
+  // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
+  const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
+  const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));
+  eq("no migrated command still dispatched inline", doubled, []);
+}
+
 group("no dead lib imports in sentinel.js");
 {
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
@@ -495,10 +512,13 @@ group("help reference (single source of truth)");
   const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("../lib/reference");
   ok("8 command groups, non-empty", COMMAND_GROUPS.length === 8 && COMMAND_GROUPS.every((g) => g.title && g.rows.length));
   ok("every row is [left, right] strings", COMMAND_GROUPS.every((g) => g.rows.every((r) => r.length === 2 && typeof r[0] === "string" && typeof r[1] === "string")));
-  // DRIFT GUARD: every documented command verb must have a real dispatch handler.
+  // DRIFT GUARD: every documented command verb must have a real dispatch handler —
+  // either an inline `cmd === "x"` branch or a lib/registry.js command entry.
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const dispatched = new Set();
   for (const m of src.matchAll(/cmd === "([^"]+)"/g)) dispatched.add(m[1]);
+  const { CMDS: REG } = require("../lib/registry");
+  for (const cmd of REG) for (const n of [cmd.name, ...(cmd.aliases || [])]) dispatched.add(n);
   const undocumentedDrift = [...documentedVerbs()].filter((v) => !dispatched.has(v));
   eq("no documented command lacks a handler", undocumentedDrift, []);
   // renderer: column math + dynamic cheats substitution + title coloring
