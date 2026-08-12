@@ -78,7 +78,7 @@ $ sentinel scan 10.10.14.7 top
   22     ssh         SSH-2.0-OpenSSH_9.6p1
   80     http
   443    https
-  ✓ 3 open ports on 10.10.14.7
+  ● 3 open ports on 10.10.14.7
   nmap: nmap -sV -sC -p 22,80,443 10.10.14.7
 ```
 
@@ -91,6 +91,35 @@ $ sentinel scan 10.10.14.7 top
 | `encode`   | base64 · hex · URL, plus MD5/SHA hashing and a hash identifier       |
 | `cheats`   | Copy-ready one-liners for every stage of an engagement              |
 | `tools`    | Catalog of tools with install commands                              |
+
+## Nexus — the AI coding agent
+
+Nexus is a full-screen terminal coding agent built into Sentinel. It drives
+whichever AI you have, with enterprise controls and a local, private option.
+
+```
+sentinel nexus                 open the agent (Claude if installed, else local)
+sentinel nexus -e ollama       drive a 100% local, private, free agent
+sentinel nexus "add tests to server.js and run them"   one-shot task
+sentinel nexus run "<goal>"    autonomous multi-step run
+sentinel policy                show the effective security policy
+sentinel audit verify          verify the tamper-evident audit trail (CI-friendly)
+```
+
+- **Works with any AI** — one registry drives Claude Code, Gemini, Codex, OpenCode,
+  Aider, and local Ollama models. A flag meant for one engine can never leak into
+  another. Switch with `/engine`, pick a model with `/model`.
+- **Multiple models together** — `/team` runs an architect, a builder, and an
+  independent reviewer (each a model of your choice) and loops until the review passes.
+- **Enterprise guardrails** — a `.nexus/policy.json` (protected paths, denied commands,
+  per-turn write limits, secret-write blocking) enforced on the agent, with an org
+  floor a local config can only tighten, plus a hash-chained audit trail.
+- **In the UI** — `/settings` for every option, output styles (`/style`), background
+  commands (`run_background`), a `remember` tool for durable project rules, cost
+  meters, plan mode, checkpoints/undo, and more.
+
+Architecture and design invariants: see [ARCHITECTURE.md](ARCHITECTURE.md).
+Run the tests with `npm test`.
 
 ## Build
 
