@@ -461,6 +461,11 @@ group("command registry (batch 1)");
   ok("revshell unknown lang falls back to bash", CMD_MAP.revshell.run({ rest: ["zzz", "1.2.3.4", "9001"], c: plain }).startsWith("bash -i"));
   eq("status 404 (plain)", CMD_MAP.status.run({ rest: ["404"], c: plain }), "404 Not Found  · 4xx client error");
   ok("status unknown code -> usage", CMD_MAP.status.run({ rest: ["999"], c: plain }).includes("unknown status code"));
+  ok("dorks builds a block per dork + h1", (() => { const s = CMD_MAP.dorks.run({ rest: ["example.com"], c: plain }); return s.includes("Google dorks for example.com") && s.includes("google.com/search?q=") && s.includes(encodeURIComponent("site:example.com")); })());
+  ok("dorks usage on empty", CMD_MAP.dorks.run({ rest: [], c: plain }).includes("usage: sentinel dorks"));
+  ok("cheats no-arg lists topics", CMD_MAP.cheats.run({ rest: [], c: plain }).startsWith("topics: "));
+  ok("cheats topic returns its lines", (() => { const s = CMD_MAP.cheats.run({ rest: ["nmap"], c: plain }); return s.includes("nmap") && !s.startsWith("topics:"); })());
+  ok("cheats unknown topic falls back to topic list", CMD_MAP.cheats.run({ rest: ["zzz"], c: plain }).startsWith("topics: "));
   // registry commands must NOT also have a leftover 'cmd === ' branch (no double dispatch)
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const doubled = CMDS.flatMap((cmd) => [cmd.name, ...(cmd.aliases || [])]).filter((n) => src.includes('cmd === "' + n + '"'));

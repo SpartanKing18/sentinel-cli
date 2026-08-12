@@ -528,7 +528,6 @@ async function myIp() {
   catch (e) { return "error: " + (e.name === "AbortError" ? "timed out" : e.message); }
   finally { clearTimeout(t); }
 }
-const { DORK_BASE, dorkUrls } = require("./lib/dorks"); // google-dork catalog + URL builder (lib/dorks.js)
 
 async function mainMenu() {
   banner();
@@ -579,11 +578,6 @@ async function ipInfo(ip) {
     [["Location", [d.city, d.regionName, d.country].filter(Boolean).join(", ")], ["ISP", d.isp], ["Org", d.org], ["AS", d.as], ["Coords", d.lat + "," + d.lon], ["Timezone", d.timezone]].forEach(([k, v]) => v && console.log("  " + k.padEnd(10) + cyan(v)));
   } catch (e) { console.log(red("error: " + (e.name === "AbortError" ? "timed out" : e.message))); }
   finally { clearTimeout(t); }
-}
-function dorks(domain) {
-  if (!domain) { console.log(red("usage: sentinel dorks example.com")); return; }
-  h1("Google dorks for " + domain);
-  dorkUrls(domain).forEach((d) => { console.log("  " + bold(d.label)); console.log("  " + gray(DORK_BASE) + d.encoded + "\n"); });
 }
 function fileHash(f) {
   try { const buf = require("fs").readFileSync(f); h1("Hashes of " + f); ["md5", "sha1", "sha256", "sha512"].forEach((a) => console.log("  " + a.padEnd(8) + cyan(crypto.createHash(a).update(buf).digest("hex")))); }
@@ -660,12 +654,10 @@ async function cli(args) {
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
   else if (cmd === "ipinfo") await ipInfo(rest[0] || "");
-  else if (cmd === "dorks") dorks(rest[0]);
   else if (cmd === "hashfile") fileHash(rest[0]);
   else if (cmd === "uuid") console.log(crypto.randomUUID());
   else if (cmd === "serve") { serveDir(rest[0], rest[1]); await new Promise(() => {}); }
   else if (cmd === "listen") { listen(rest[0]); await new Promise(() => {}); }
-  else if (cmd === "cheats") { const t = rest[0]; if (t && CHEATS[t]) CHEATS[t].forEach((l) => console.log(l)); else console.log("topics: " + Object.keys(CHEATS).join(", ")); }
   else if (cmd === "tools") { h1("Tools"); TOOLS.forEach(([n, cat, inst]) => console.log("  " + bold(n.padEnd(14)) + gray(cat.padEnd(10)) + (inst.split(" ").slice(0,3).join(" ")))); console.log("\n  " + gray("configure any tool with: ") + "sentinel setup <name>"); }
   else if (cmd === "setup") await setupTool(rest[0]);
   else if (cmd === "init") nexusInit();
