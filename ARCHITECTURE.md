@@ -27,8 +27,9 @@ lib/
   scanutil.js          security-console core: parsePorts, idHash, parseCve, cidrCalc
   loop.js              autonomous goal-loop controller (Nexus /loop)
   ioc.js               IOC defang / refang (safe-to-paste indicators)
+  entropy.js           Shannon entropy — flag high-entropy secrets/keys
 test/
-  run.js               framework-free unit suite (npm test) — 171 assertions
+  run.js               framework-free unit suite (npm test) — 178 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

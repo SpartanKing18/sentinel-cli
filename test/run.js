@@ -20,6 +20,7 @@ const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
 const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc } = require("../lib/scanutil");
 const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
 const { defang, refang } = require("../lib/ioc");
+const { shannon, assess } = require("../lib/entropy");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -302,6 +303,17 @@ group("IOC defang / refang tool");
   const original = "https://evil.example.com/path?u=admin@corp.com and 10.0.0.1";
   ok("defang -> refang round-trips", refang(defang(original)) === original);
   ok("refang tolerates plain hxxp://", refang("hxxp://x[.]y") === "http://x.y");
+}
+
+group("entropy tool (secret / randomness detection)");
+{
+  ok("all-same char → 0 bits", shannon("aaaaaa") === 0);
+  ok("empty → 0", shannon("") === 0);
+  ok("4 equal symbols → 2 bits/char", Math.abs(shannon("abcd") - 2) < 1e-9);
+  ok("8 equal symbols → 3 bits/char", Math.abs(shannon("abcdefgh") - 3) < 1e-9);
+  ok("random 32-hex key → high", assess("9f86d081884c7d659a2feaa0c55ad015").level === "high" && assess("9f86d081884c7d659a2feaa0c55ad015").likelySecret === true);
+  ok("predictable value → low", assess("password").level === "low" && assess("aaaaaaaaaaaaaaaa").level === "low");
+  ok("assess reports totalBits", Math.abs(assess("abcd").totalBits - 8) < 1e-9);
 }
 
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
