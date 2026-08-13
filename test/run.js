@@ -525,6 +525,27 @@ group("tech-debt scanner (/todo)");
   try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("dependency hygiene (/deps)");
+{
+  const { packageName, parseImports, auditDeps, isBuiltin, scanImports } = require("../lib/nexus/deps");
+  eq("packageName strips subpaths + scopes; null for relative/builtin", [packageName("lodash/fp"), packageName("@babel/core/lib"), packageName("./x"), packageName("fs")], ["lodash", "@babel/core", null, null]);
+  ok("isBuiltin handles node: prefix", isBuiltin("fs") && isBuiltin("node:path") && !isBuiltin("express"));
+  const src = 'const fs=require("fs"); import x from "express"; import {a} from "@scope/pkg"; const y=require("./local"); import("chalk"); export {z} from "zod/lib";';
+  const specs = parseImports(src);
+  ok("parseImports covers require/import/dynamic/export-from", ["fs", "express", "@scope/pkg", "./local", "chalk", "zod/lib"].every((s) => specs.includes(s)));
+  const a = auditDeps({ pkg: { dependencies: { express: "^4", unusedpkg: "^1" }, devDependencies: { jest: "^29" } }, specifiers: specs });
+  eq("unused = declared minus imported", a.unused, ["jest", "unusedpkg"]);
+  eq("missing = imported minus declared (builtins/relative excluded)", a.missing, ["@scope/pkg", "chalk", "zod"]);
+  ok("clean project reports no unused/missing", (() => { const c = auditDeps({ pkg: { dependencies: { express: "^4" } }, specifiers: ["express", "fs", "./x"] }); return !c.unused.length && !c.missing.length; })());
+  // scanImports over a temp project
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-deps-"));
+  fs.writeFileSync(path.join(d, "a.js"), 'require("chalk"); const p=require("path");');
+  fs.mkdirSync(path.join(d, "node_modules")); fs.writeFileSync(path.join(d, "node_modules", "dep.js"), 'require("should-be-ignored");');
+  const found = scanImports(d);
+  ok("scanImports collects source specifiers, skips node_modules", found.includes("chalk") && found.includes("path") && !found.includes("should-be-ignored"));
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
 group("codebase stats (/stats)");
 {
   const { langOf, summarizeStats, rankedLangs, scanStats } = require("../lib/nexus/codestats");
