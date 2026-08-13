@@ -46,8 +46,10 @@ lib/
   hashing.js           md5/sha digests + injectable-rng password gen (pure, tested)
   encoders.js          b64/hex/url/base32 encode-decode op map (pure, shared CLI+menu)
   usage.js             per-project AI usage ledger + cost/chargeback report (pure, tested)
+  identity.js          operator/team resolution — SSO env → config → OS user (pure)
+  compliance.js        signed audit+usage compliance bundle + verify (SOC2 export)
 test/
-  run.js               framework-free unit suite (npm test) — 339 assertions
+  run.js               framework-free unit suite (npm test) — 354 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```

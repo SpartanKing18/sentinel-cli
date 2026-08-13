@@ -630,5 +630,48 @@ group("usage ledger + chargeback report");
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("operator/team attribution");
+{
+  const { resolveOperator } = require("../lib/identity");
+  const { summarize, renderReport } = require("../lib/usage");
+  // env (SSO-provisioned) wins
+  eq("env identity wins", resolveOperator({ env: { SENTINEL_OPERATOR: "alice", SENTINEL_TEAM: "platform" }, cwd: os.tmpdir() }), { operator: "alice", team: "platform", source: "sso-env" });
+  // local config fallback
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-id-")); fs.mkdirSync(path.join(d, ".nexus"));
+  fs.writeFileSync(path.join(d, ".nexus", "identity.json"), JSON.stringify({ operator: "bob", team: "payments" }));
+  eq("config identity when env is empty", resolveOperator({ env: {}, cwd: d }), { operator: "bob", team: "payments", source: "config" });
+  ok("OS-user fallback never blank", (() => { const r = resolveOperator({ env: {}, cwd: os.tmpdir() }); return r.operator && r.source === "os"; })());
+  // attribution rolls up per operator + team
+  const recs = [
+    { ts: "2026-08-12T09:00:00Z", engine: "claude", model: "opus", inTok: 100, outTok: 50, cost: 0.05, operator: "alice", team: "platform" },
+    { ts: "2026-08-12T10:00:00Z", engine: "claude", model: "opus", inTok: 80, outTok: 40, cost: 0.03, operator: "bob", team: "payments" },
+    { ts: "2026-08-12T11:00:00Z", engine: "ollama", model: "qwen", inTok: 500, outTok: 200, cost: 0, operator: "alice", team: "platform" },
+  ];
+  const s = summarize(recs);
+  ok("byOperator rollup", s.byOperator.alice.turns === 2 && Math.round(s.byOperator.alice.cost * 100) / 100 === 0.05 && s.byOperator.bob.turns === 1);
+  ok("byTeam rollup", s.byTeam.platform.turns === 2 && s.byTeam.payments.turns === 1);
+  ok("report shows team + operator sections when multiple", (() => { const r = renderReport(s, { project: "x" }); return r.includes("By team") && r.includes("By operator") && r.includes("alice") && r.includes("payments"); })());
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
+group("compliance bundle (SOC2 export)");
+{
+  const { buildBundle, verifyBundle, renderBundleMd, sha256 } = require("../lib/compliance");
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-comp-")); fs.mkdirSync(path.join(d, ".nexus"));
+  fs.writeFileSync(path.join(d, ".nexus", "usage.jsonl"), JSON.stringify({ ts: "2026-08-12T10:00:00Z", engine: "claude", model: "opus", inTok: 100, outTok: 50, cost: 0.02, operator: "alice", team: "platform" }) + "\n");
+  fs.writeFileSync(path.join(d, ".nexus", "policy.json"), JSON.stringify({ protectedPaths: [".env"], audit: true }));
+  const b = buildBundle(d, { operator: "alice", team: "platform", now: "2026-08-12T12:00:00Z", signingKey: "secret" });
+  eq("bundle metadata", [b.kind, b.version, b.generatedAt, b.operator, b.team], ["sentinel.compliance.bundle", 1, "2026-08-12T12:00:00Z", "alice", "platform"]);
+  ok("bundle carries usage + manifest digests", b.usage.turns === 1 && b.manifest["usage.jsonl"].sha256.length === 64 && b.manifest["policy.json"]);
+  ok("integrity + signature present", b.integrity.algo === "sha256" && b.integrity.hash.length === 64 && b.signature.algo === "hmac-sha256");
+  eq("verify a good signed bundle", verifyBundle(b, "secret"), { hashOk: true, sigOk: true });
+  ok("wrong key fails signature but hash still ok", (() => { const v = verifyBundle(b, "nope"); return v.hashOk === true && v.sigOk === false; })());
+  ok("tampering breaks integrity + signature", (() => { const t = JSON.parse(JSON.stringify(b)); t.usage.cost = 999; const v = verifyBundle(t, "secret"); return v.hashOk === false && v.sigOk === false; })());
+  ok("unsigned bundle: sigOk is null", (() => { const u = buildBundle(d, { operator: "alice", now: "2026-08-12T12:00:00Z" }); return u.signature === undefined && verifyBundle(u).sigOk === null && verifyBundle(u).hashOk === true; })());
+  ok("markdown render has the key sections", (() => { const md = renderBundleMd(b); return md.includes("# Sentinel compliance report") && md.includes("Operator:** alice") && md.includes("Manifest (SHA-256)") && md.includes(b.integrity.hash); })());
+  ok("deterministic with fixed now + injected key", buildBundle(d, { operator: "alice", team: "platform", now: "2026-08-12T12:00:00Z", signingKey: "secret" }).integrity.hash === b.integrity.hash);
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
 process.exit(fail ? 1 : 0);

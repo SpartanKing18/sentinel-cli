@@ -679,6 +679,24 @@ async function cli(args) {
     else if (!recs.length) console.log("  " + gray("no usage recorded in .nexus/usage.jsonl" + (since ? " since " + since : "") + " — run some Nexus turns first (sentinel nexus)"));
     else console.log("\n" + renderReport(s, { project: path.basename(process.cwd()) }) + "\n");
   }
+  else if (cmd === "compliance") {
+    // Enterprise SOC2/audit export: a signed bundle over audit + usage + policy.
+    const fs = require("fs");
+    if (rest[0] === "verify") {
+      const f = rest[1]; if (!f) { console.log(red("usage: sentinel compliance verify <bundle.json>")); process.exit(2); }
+      try { const b = JSON.parse(fs.readFileSync(f, "utf8")); const key = process.env.SENTINEL_SIGNING_KEY || ""; const v = verifyBundle(b, key || undefined);
+        const sig = v.sigOk === null ? (b.signature ? gray("signature present — set SENTINEL_SIGNING_KEY to verify it") : gray("unsigned")) : (v.sigOk ? green("signature valid") : red("signature INVALID"));
+        console.log("  integrity  " + (v.hashOk ? green("OK — bundle not altered") : red("TAMPERED")) + "\n  signature  " + sig);
+        process.exit(v.hashOk && v.sigOk !== false ? 0 : 1); // CI gate
+      } catch (e) { console.log(red("could not read/parse bundle: " + (e && e.message || e))); process.exit(2); }
+    }
+    const id = resolveOperator({ cwd: process.cwd() });
+    const key = process.env.SENTINEL_SIGNING_KEY || "";
+    const b = buildBundle(process.cwd(), { operator: id.operator, team: id.team, signingKey: key || undefined });
+    if (rest.includes("--json")) console.log(JSON.stringify(b, null, 2));
+    else console.log("\n" + renderBundleMd(b) + "\n");
+    const oi = rest.indexOf("--out"); if (oi >= 0 && rest[oi + 1]) { try { fs.writeFileSync(rest[oi + 1], JSON.stringify(b, null, 2)); console.log(gray("  written: " + rest[oi + 1])); } catch (e) { console.log(red("  write failed: " + (e && e.message || e))); } }
+  }
   else if (cmd === "doctor") {
     const reach = await ollamaReachable(), auth = nexusAuth(), warns = policyWarnings(process.cwd()), v = auditVerify(process.cwd());
     const health = { engines: Object.fromEntries(ENGINE_ORDER.map((e) => [e, engineAvail(e)])), ollamaReachable: reach, signedIn: !!auth, account: auth ? (auth.name || auth.email || auth.uid) : null, policyValid: warns.length === 0, policyWarnings: warns, audit: v.empty ? "empty" : v.ok ? "intact" : "tampered", auditCount: v.count || 0 };
@@ -1235,6 +1253,8 @@ function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try 
 // its system prompt plus the existing plan-mode / disallowed-tools controls.
 const { POLICY_DEFAULTS, policyCheck, auditLog, auditVerify } = require("./lib/policy"); // guardrails engine (lib/policy.js)
 const { appendUsage, loadUsage, summarize, renderReport } = require("./lib/usage"); // cost/usage ledger + chargeback report (lib/usage.js)
+const { resolveOperator } = require("./lib/identity"); // operator/team attribution — SSO env → config → OS user (lib/identity.js)
+const { buildBundle, verifyBundle, renderBundleMd } = require("./lib/compliance"); // signed audit+usage compliance bundle (lib/compliance.js)
 const { validatePolicy, validateTeam } = require("./lib/validate"); // config validation (lib/validate.js)
 // Read + validate the raw .nexus/policy.json and ~/.sentinel/policy.json; returns warning strings.
 function policyWarnings(cwd) { const fs = require("fs"), path = require("path"); const w = []; for (const [label, p] of [["local .nexus/policy.json", path.join(cwd, ".nexus", "policy.json")], ["org ~/.sentinel/policy.json", path.join(sentinelHome(), "policy.json")]]) { let raw; try { raw = fs.readFileSync(p, "utf8"); } catch (_) { continue; } let obj; try { obj = JSON.parse(raw); } catch (e) { w.push(label + ": invalid JSON (" + e.message + ")"); continue; } for (const m of validatePolicy(obj)) w.push(label + ": " + m); } return w; }
@@ -1542,6 +1562,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const PAID = {}, CTXW = {}; for (const e of ENGINE_ORDER) { PAID[e] = ENGINES[e].paid; CTXW[e] = ENGINES[e].ctx; } // derived from the registry — never drifts
     const transcript = [{ role: "art" }, { role: "system", text: "AI coding agent  ·  " + engine + "  ·  " + cwd + "\ntype a message  ·  / for commands  ·  @file inline  ·  !cmd shell  ·  #note memory" }];
     const sess = { model: engine, ctxWindow: CTXW[engine] || 200000, ctxUsed: 0, inTok: 0, outTok: 0, cost: 0, liveOut: 0 };
+    const ident = resolveOperator({ cwd }); // operator/team for chargeback attribution + audit provenance
     const oMsgs = nexusMd ? [{ role: "system", content: "You are Nexus, a concise expert coding assistant.\n" + nexusMd }] : [{ role: "system", content: "You are Nexus, a concise expert coding assistant." }];
     let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
     let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0, menuSel = 0; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom; menuSel = highlighted slash-menu row
@@ -1606,6 +1627,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/help", "commands, input prefixes & keys"], ["/clear", "start a fresh chat"], ["/compact", "summarize & shrink the context"],
       ["/context", "show token / context usage"], ["/cost", "session token cost so far"], ["/budget", "set a spend cap in USD"],
       ["/report", "cost & usage report for chargeback (/report json|save|since <date>)"],
+      ["/compliance", "write a signed audit+usage compliance bundle (SOC2/review)"],
       ["/undo", "revert the last turn's file changes"], ["/rewind", "restore a specific checkpoint (/rewind N)"], ["/checkpoints", "list undo checkpoints"],
       ["/resume", "reload the last saved session"], ["/export", "save the conversation to a markdown file"], ["/copy", "copy the last reply to the clipboard"],
       ["/status", "session engine, model, tokens & cost"], ["/doctor", "check engines & tools are available"], ["/init", "scaffold .nexus/ in this project"],
@@ -1892,7 +1914,7 @@ function nexusTui(engine, cwd, nexusMd) {
         const din = sess.inTok - stat.inTok0, dout = sess.outTok - stat.outTok0, dcost = sess.cost - stat.cost0;
         if (PAID[engine]) { impact.cloudTurns++; impact.cloudInTok += Math.max(0, din); impact.cloudOutTok += Math.max(0, dout); impact.cloudCost += Math.max(0, dcost); } else { impact.localTurns++; impact.localTok += Math.max(0, din + dout); }
         // Chargeback ledger: one non-sensitive metrics line per turn (no prompt text, no paths).
-        try { appendUsage(cwd, { ts: new Date().toISOString(), engine, model: sess.model || engine, mode: ["normal", "auto", "plan"][mode] || "normal", inTok: Math.max(0, din), outTok: Math.max(0, dout), cost: Math.max(0, dcost), seconds: +dt, files: stat.files.size, commands: stat.cmds, interrupted: !!(res && res.interrupted) }); } catch (_) {}
+        try { appendUsage(cwd, { ts: new Date().toISOString(), operator: ident.operator, team: ident.team, engine, model: sess.model || engine, mode: ["normal", "auto", "plan"][mode] || "normal", inTok: Math.max(0, din), outTok: Math.max(0, dout), cost: Math.max(0, dcost), seconds: +dt, files: stat.files.size, commands: stat.cmds, interrupted: !!(res && res.interrupted) }); } catch (_) {}
         const bits = [];
         if (stat.files.size) bits.push(stat.files.size + " file" + (stat.files.size > 1 ? "s" : ""));
         if (stat.cmds) bits.push(stat.cmds + " cmd" + (stat.cmds > 1 ? "s" : ""));
@@ -2240,7 +2262,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /impact\nunique:  /race · /ensemble · /bench · /review · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -2261,6 +2283,7 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/cost") transcript.push({ role: "system", text: PAID[engine] ? ("session: ↑" + fmtK(sess.inTok) + " in · ↓" + fmtK(sess.outTok) + " out" + (sess.cost ? " · $" + sess.cost.toFixed(4) : "") + (costCap ? " · cap $" + costCap.toFixed(2) : "")) : "engine is local (Ollama) — free, no token charges" });
       else if (cmd === "/budget") { const v = parseFloat(arg); if (arg && !isNaN(v) && v > 0) { costCap = v; transcript.push({ role: "system", text: "budget cap set to $" + v.toFixed(2) + " — turns pause when session cost reaches it" }); } else if (arg === "off" || arg === "0") { costCap = 0; transcript.push({ role: "system", text: "budget cap removed" }); } else transcript.push({ role: "system", text: "usage: /budget <usd>  (e.g. /budget 5.00, or /budget off)" }); }
       else if (cmd === "/report") { const parts = (arg || "").trim().split(/\s+/).filter(Boolean); const si = parts.indexOf("since"); const since = si >= 0 ? parts[si + 1] : null; const recs = loadUsage(cwd, since ? { since } : {}); if (!recs.length) { transcript.push({ role: "system", text: "no usage recorded yet" + (since ? " since " + since : "") + " (.nexus/usage.jsonl fills up as you run turns)" }); } else { const s = summarize(recs); if (parts[0] === "json") transcript.push({ role: "system", text: JSON.stringify(s, null, 2) }); else { const rep = renderReport(s, { project: path.basename(cwd) }); if (parts[0] === "save") { try { const f = path.join(cwd, ".nexus", "usage-report.md"); fs.writeFileSync(f, "```\n" + rep + "\n```\n"); transcript.push({ role: "system", text: "saved usage report to " + f }); } catch (e) { transcript.push({ role: "system", text: "could not save report: " + (e && e.message || e) }); } } else transcript.push({ role: "system", text: rep + "\n\n  /report json · /report save · /report since 2026-08-01 · headless: sentinel report" }); } } }
+      else if (cmd === "/compliance") { try { const key = process.env.SENTINEL_SIGNING_KEY || ""; const b = buildBundle(cwd, { operator: ident.operator, team: ident.team, signingKey: key || undefined }); const stamp = new Date().toISOString().replace(/[:.]/g, "-"); const base = path.join(cwd, ".nexus", "compliance-" + stamp); fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(base + ".json", JSON.stringify(b, null, 2)); fs.writeFileSync(base + ".md", renderBundleMd(b)); transcript.push({ role: "system", text: "compliance bundle written (operator " + ident.operator + (ident.team ? " · team " + ident.team : "") + "):\n  " + base + ".json\n  " + base + ".md\n  audit chain: " + (b.auditChain.present ? (b.auditChain.verified ? "verified (" + b.auditChain.records + " records)" : "BROKEN — " + b.auditChain.reason) : "none yet") + "\n  integrity: sha256 " + b.integrity.hash.slice(0, 16) + "…" + (b.signature ? "\n  signed: hmac-sha256 (SENTINEL_SIGNING_KEY)" : "\n  tip: set SENTINEL_SIGNING_KEY to HMAC-sign the bundle") + "\n  verify: sentinel compliance verify " + base + ".json" }); } catch (e) { transcript.push({ role: "system", text: "compliance export failed: " + (e && e.message || e) }); } }
       else if (cmd === "/undo") { if (!checkpoints.length) transcript.push({ role: "system", text: "nothing to undo (no checkpoints this session, or not a git repo)" }); else { const ck = checkpoints.pop(); const nowTree = nexusCheckpoint(cwd); const ok = nexusRestore(cwd, ck.tree, ck.paths); if (ok && nowTree) redoStack.push({ tree: nowTree, label: ck.label, paths: ck.paths }); transcript.push({ role: "system", text: ok ? ("undid \"" + ck.label + "\" — restored " + ((ck.paths && ck.paths.length) ? ck.paths.length + " file(s) Nexus changed this turn (unrelated edits untouched)" : "the working tree") + " (/redo to reapply)") : "undo failed (git error)" }); } }
       else if (cmd === "/redo") { const r = redoStack.pop(); if (!r) transcript.push({ role: "system", text: "nothing to redo" }); else { const ok = nexusRestore(cwd, r.tree, r.paths); if (ok) checkpoints.push({ tree: r.tree, label: r.label, ts: Date.now(), paths: r.paths }); transcript.push({ role: "system", text: ok ? ("redid — reapplied the changes from \"" + r.label + "\"") : "redo failed (git error)" }); } }
       else if (cmd === "/race") { if (!argstr) transcript.push({ role: "system", text: "usage: /race <prompt>  — runs it on every available engine (claude/local/opencode) at once and shows all answers" }); else raceEngines(argstr); }
