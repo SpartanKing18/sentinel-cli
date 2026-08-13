@@ -525,6 +525,32 @@ group("tech-debt scanner (/todo)");
   try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("codebase stats (/stats)");
+{
+  const { langOf, summarizeStats, rankedLangs, scanStats } = require("../lib/nexus/codestats");
+  ok("langOf maps extensions (case-insensitive), unknown -> null", langOf("a.ts") === "TypeScript" && langOf("X.PY") === "Python" && langOf("Makefile") === null);
+  const e = [
+    { file: "a.js", lines: 100, bytes: 2000, lang: "JavaScript" },
+    { file: "b.js", lines: 50, bytes: 900, lang: "JavaScript" },
+    { file: "c.py", lines: 200, bytes: 5000, lang: "Python" },
+    { file: "readme", lines: 0, bytes: 0, lang: null },
+  ];
+  const s = summarizeStats(e);
+  eq("totals ignore unrecognized files", [s.totalFiles, s.totalLines, s.totalBytes], [3, 350, 7900]);
+  ok("byLang aggregates per language", s.byLang.JavaScript.files === 2 && s.byLang.JavaScript.lines === 150 && s.byLang.Python.lines === 200);
+  eq("rankedLangs by lines desc", rankedLangs(s).map((l) => l[0]), ["Python", "JavaScript"]);
+  eq("largest files by line count", s.largest.map((f) => f.file), ["c.py", "a.js", "b.js"]);
+  // scanTree over a temp project: counts source, skips node_modules + non-code
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-stats-"));
+  fs.writeFileSync(path.join(d, "app.js"), "a\nb\nc\n");
+  fs.writeFileSync(path.join(d, "svc.py"), "x\ny\n");
+  fs.mkdirSync(path.join(d, "node_modules")); fs.writeFileSync(path.join(d, "node_modules", "dep.js"), "ignored\n");
+  fs.writeFileSync(path.join(d, "data.bin"), "not source");
+  const st = summarizeStats(scanStats(d));
+  ok("scanStats reads source, skips node_modules + non-code", st.totalFiles === 2 && st.byLang.JavaScript.files === 1 && st.byLang.Python.files === 1);
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
 group("hashing + password gen");
 {
   const { ALGOS, GENPASS_CHARS, digests, genPass } = require("../lib/toolkit/hashing");

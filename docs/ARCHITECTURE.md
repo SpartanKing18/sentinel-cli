@@ -46,6 +46,7 @@ lib/                   pure, testable logic in four domain subpackages
     bgjobs.js            background-command manager (run_background/check/stop)
     memory.js            durable-note merge with dedup (the agent `remember` tool)
     todos.js             tech-debt marker scanner (TODO/FIXME/HACK) — /todo, sentinel todo
+    codestats.js         codebase overview: files/lines/languages — /stats, sentinel stats
   governance/          enterprise policy, audit, cost & compliance
     policy.js            guardrails engine: policyCheck + tamper-evident audit chain
     security.js          scanSecrets / maskSecrets / classifyDanger / compactOutput
@@ -53,7 +54,7 @@ lib/                   pure, testable logic in four domain subpackages
     identity.js          operator/team resolution — SSO env -> config -> OS user
     compliance.js        signed audit+usage compliance bundle + verify (SOC2 export)
 test/
-  run.js               framework-free unit suite (npm test) — 362 assertions
+  run.js               framework-free unit suite (npm test) — 368 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
