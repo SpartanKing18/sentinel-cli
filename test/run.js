@@ -525,6 +525,28 @@ group("tech-debt scanner (/todo)");
   try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("env-var audit (/env)");
+{
+  const { scanEnvRefs, parseEnvFile, auditEnv, readEnvFiles, scanEnvTree, COMMON } = require("../lib/nexus/envaudit");
+  const src = 'const a=process.env.API_KEY; const b=process.env["DB_URL"]; if(process.env.NODE_ENV==="p"){} const p=process.env.PORT;';
+  eq("scanEnvRefs finds all forms", scanEnvRefs(src).sort(), ["API_KEY", "DB_URL", "NODE_ENV", "PORT"]);
+  eq("parseEnvFile honors export + skips comments", parseEnvFile("# c\nexport API_KEY=abc\nDB_URL=x\nSTALE=1\n\n"), ["API_KEY", "DB_URL", "STALE"]);
+  const a = auditEnv({ used: scanEnvRefs(src), declared: ["API_KEY", "DB_URL", "STALE"] });
+  eq("undocumented excludes common runtime vars (NODE_ENV/PORT)", a.undocumented, []);
+  eq("unused = declared but never referenced", a.unused, ["STALE"]);
+  ok("undocumented surfaces a real gap", auditEnv({ used: ["SECRET_TOKEN"], declared: [] }).undocumented.length === 1);
+  ok("ignoreCommon:false includes NODE_ENV/PORT", auditEnv({ used: scanEnvRefs(src), declared: [], ignoreCommon: false }).undocumented.includes("NODE_ENV"));
+  ok("COMMON has the usual runtime vars", COMMON.has("NODE_ENV") && COMMON.has("PORT"));
+  // tree + template walk
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-env-"));
+  fs.writeFileSync(path.join(d, "app.js"), 'process.env.API_KEY; process.env.MISSING_ONE;');
+  fs.writeFileSync(path.join(d, ".env.example"), "API_KEY=\nOLD_KEY=\n");
+  const used = scanEnvTree(d).used, envf = readEnvFiles(d);
+  const at = auditEnv({ used, declared: envf.declared });
+  ok("end-to-end: MISSING_ONE undocumented, OLD_KEY unused", at.undocumented.includes("MISSING_ONE") && at.unused.includes("OLD_KEY") && envf.files.includes(".env.example"));
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
 group("dependency hygiene (/deps)");
 {
   const { packageName, parseImports, auditDeps, isBuiltin, scanImports } = require("../lib/nexus/deps");
