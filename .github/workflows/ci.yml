@@ -21,7 +21,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Syntax-check every source file
         run: |
-          for f in sentinel.js lib/*.js test/*.js; do
+          for f in $(find sentinel.js lib test -name '*.js' | sort); do
             echo "checking $f"
             node --check "$f"
           done

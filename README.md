@@ -118,8 +118,23 @@ sentinel audit verify          verify the tamper-evident audit trail (CI-friendl
   commands (`run_background`), a `remember` tool for durable project rules, cost
   meters, plan mode, checkpoints/undo, and more.
 
-Architecture and design invariants: see [ARCHITECTURE.md](ARCHITECTURE.md).
-Run the tests with `npm test`.
+## Project structure
+
+```
+sentinel.js         entry point — CLI dispatch + the Nexus agent full-screen TUI
+lib/                pure, testable logic in four domain subpackages:
+  cli/                command registry, --help catalog, settings, presentation
+  toolkit/            security & OSINT primitives (encoders, scanners, IOC, JWT…)
+  nexus/              AI coding-agent infrastructure (engines, cost, tools, loop)
+  governance/         policy guardrails, audit chain, usage ledger, compliance
+test/run.js         framework-free unit suite (npm test) — 354 assertions
+docs/               ARCHITECTURE, RESPONSIBLE_USE, BUILDLOG, PR notes
+.github/workflows/  CI: node --check + tests + CLI smoke on Node 18/20/22
+```
+
+Full module map and the test-enforced design invariants (engine isolation, least
+privilege, provenance): see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Run the
+tests with `npm test`.
 
 ## Build
 
