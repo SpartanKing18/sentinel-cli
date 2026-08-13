@@ -503,6 +503,28 @@ group("encoders (shared CLI + menu)");
   eq("invalid base32 -> guarded message", ENC.base32d("!!!"), "(invalid base32)");
 }
 
+group("tech-debt scanner (/todo)");
+{
+  const { scanText, summarizeTodos, rankTodos, scanTree, TAGS } = require("../lib/nexus/todos");
+  const src = ["a=1 // TODO: wire it", "// FIXME broken", "ok()", "  # HACK: temp", "plain", "// NOTE - test later", "let TODOLIST=[] // no marker"].join("\n");
+  const items = scanText(src, "a.js");
+  eq("finds the four real markers in order of appearance", items.map((i) => i.tag), ["TODO", "FIXME", "HACK", "NOTE"]);
+  ok("captures file + line + text", items[0].file === "a.js" && items[0].line === 1 && items[0].text === "wire it");
+  ok("word-boundary excludes TODOLIST", !items.some((i) => i.text.includes("no marker")));
+  eq("summarize", summarizeTodos(items), { total: 4, byTag: { TODO: 1, FIXME: 1, HACK: 1, NOTE: 1 }, files: 1 });
+  eq("rank by severity (FIXME>HACK>TODO>NOTE)", rankTodos(items).map((i) => i.tag), ["FIXME", "HACK", "TODO", "NOTE"]);
+  ok("TAGS covers common markers", ["TODO", "FIXME", "HACK", "BUG"].every((t) => TAGS.includes(t)));
+  // scanTree over a temp project: skips node_modules, reads source
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-todo-"));
+  fs.writeFileSync(path.join(d, "x.js"), "// TODO: alpha\nfn()\n// BUG: beta\n");
+  fs.mkdirSync(path.join(d, "node_modules")); fs.writeFileSync(path.join(d, "node_modules", "dep.js"), "// TODO: should be ignored\n");
+  fs.writeFileSync(path.join(d, "notes.txt"), "// TODO: non-source ignored\n");
+  const { items: tree, files } = scanTree(d);
+  ok("scanTree reads source, skips node_modules + non-code", tree.length === 2 && files === 1 && tree.every((i) => i.file === "x.js"));
+  ok("scanTree respects maxItems", scanTree(d, { maxItems: 1 }).items.length === 1);
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
+}
+
 group("hashing + password gen");
 {
   const { ALGOS, GENPASS_CHARS, digests, genPass } = require("../lib/toolkit/hashing");
