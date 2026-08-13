@@ -607,5 +607,28 @@ group("diceware passphrase");
   ok("entropy bits scale with words", passphraseBits(4) === Math.round(4 * Math.log2(WORDS.length)) && passphraseBits(6) > passphraseBits(4));
 }
 
+group("usage ledger + chargeback report");
+{
+  const { appendUsage, loadUsage, summarize, renderReport, MONEY, TOK } = require("../lib/usage");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-usage-"));
+  ok("appendUsage writes + loadUsage reads", (() => {
+    appendUsage(dir, { ts: "2026-08-11T09:00:00Z", engine: "claude", model: "claude-opus-4-8", inTok: 1000, outTok: 500, cost: 0.04, seconds: 10, files: 2, commands: 1 });
+    appendUsage(dir, { ts: "2026-08-12T10:00:00Z", engine: "ollama", model: "qwen2.5-coder", inTok: 4000, outTok: 2000, cost: 0, seconds: 30, files: 1, commands: 2, interrupted: true });
+    return loadUsage(dir).length === 2;
+  })());
+  ok("loadUsage since-filter", loadUsage(dir, { since: "2026-08-12" }).length === 1);
+  ok("malformed ledger lines are skipped", (() => { fs.appendFileSync(path.join(dir, ".nexus", "usage.jsonl"), "not json\n"); return loadUsage(dir).length === 2; })());
+  const s = summarize(loadUsage(dir));
+  eq("summarize totals", [s.turns, s.inTok, s.outTok, s.files, s.commands, s.interrupted], [2, 5000, 2500, 3, 3, 1]);
+  ok("summarize cost", Math.round(s.cost * 1000) / 1000 === 0.04);
+  ok("byEngine + byDay breakdowns", s.byEngine.claude.turns === 1 && s.byEngine.ollama.turns === 1 && Object.keys(s.byDay).length === 2);
+  ok("first/last timestamps span the ledger", s.firstTs === "2026-08-11T09:00:00Z" && s.lastTs === "2026-08-12T10:00:00Z");
+  ok("loadUsage on a dir with no ledger → []", loadUsage(fs.mkdtempSync(path.join(os.tmpdir(), "nexus-empty-"))).length === 0);
+  const rep = renderReport(s, { project: "acme" });
+  ok("report has header + cost + engine + day sections", /Nexus usage report — acme/.test(rep) && rep.includes("$0.0400") && rep.includes("claude") && rep.includes("By day"));
+  eq("MONEY + TOK formatting", [MONEY(0.04), TOK(1500), TOK(2500000)], ["$0.0400", "1.5k", "2.50M"]);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+}
+
 console.log("\n" + (fail ? "\x1b[31m" : "\x1b[32m") + pass + " passed, " + fail + " failed\x1b[0m");
 process.exit(fail ? 1 : 0);

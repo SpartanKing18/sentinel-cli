@@ -45,8 +45,9 @@ lib/
   registry.js          data-driven command registry (19 cmds: all string-returning commands)
   hashing.js           md5/sha digests + injectable-rng password gen (pure, tested)
   encoders.js          b64/hex/url/base32 encode-decode op map (pure, shared CLI+menu)
+  usage.js             per-project AI usage ledger + cost/chargeback report (pure, tested)
 test/
-  run.js               framework-free unit suite (npm test) — 329 assertions
+  run.js               framework-free unit suite (npm test) — 339 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
