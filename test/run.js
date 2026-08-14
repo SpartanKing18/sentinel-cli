@@ -525,6 +525,31 @@ group("tech-debt scanner (/todo)");
   try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("ultrareview (multi-lens review prompt)");
+{
+  const { buildReviewPrompt, countBySeverity, DIMENSIONS, SEVERITY } = require("../lib/nexus/review");
+  const p = buildReviewPrompt("diff --git a/x b/x\n+ dangerous()", {});
+  ok("prompt covers every dimension", DIMENSIONS.every((d) => p.includes(d.label)));
+  ok("prompt embeds the diff + asks for severity + verdict", p.includes("dangerous()") && SEVERITY.every((s) => p.includes(s)) && /VERDICT/.test(p));
+  ok("diff is truncated past maxDiff", buildReviewPrompt("x".repeat(30000), { maxDiff: 100 }).includes("truncated"));
+  eq("countBySeverity tallies tags case-insensitively", countBySeverity("[CRITICAL] a\n[high] b\n[High] c\n[nit] d"), { critical: 1, high: 2, medium: 0, low: 0, nit: 1 });
+}
+
+group("changelog (release notes)");
+{
+  const { classify, parseCommits, groupCommits, renderChangelog } = require("../lib/nexus/changelog");
+  eq("classify conventional commit", classify("feat(cli): add /env"), { type: "feat", scope: "cli", breaking: false, subject: "add /env" });
+  eq("classify non-conventional -> other", classify("random change").type, "other");
+  ok("classify flags breaking (!)", classify("feat!: drop node 16").breaking === true);
+  const cs = parseCommits("a1b2c3\tfeat: thing\nd4e5f6\tfix(ui): crash\n9z8y7x\tchore: bump\nqqq\tno-type here");
+  eq("parseCommits parses hash + type", [cs.length, cs[0].hash, cs[0].type, cs[3].type], [4, "a1b2c3", "feat", "other"]);
+  const g = groupCommits(cs);
+  ok("groupCommits buckets by type", g.feat.length === 1 && g.fix.length === 1 && g.chore.length === 1 && g.other.length === 1);
+  const md = renderChangelog(cs, { title: "Release 2.30", range: "v2.29..HEAD" });
+  ok("renders grouped markdown with scope + hash", md.includes("# Release 2.30") && md.includes("## Features") && md.includes("**ui:** crash") && md.includes("(a1b2c3)"));
+  ok("empty range renders a placeholder", renderChangelog([], {}).includes("No commits"));
+}
+
 group("env-var audit (/env)");
 {
   const { scanEnvRefs, parseEnvFile, auditEnv, readEnvFiles, scanEnvTree, COMMON } = require("../lib/nexus/envaudit");

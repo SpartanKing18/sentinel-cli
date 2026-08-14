@@ -679,6 +679,16 @@ async function cli(args) {
     else if (!recs.length) console.log("  " + gray("no usage recorded in .nexus/usage.jsonl" + (since ? " since " + since : "") + " — run some Nexus turns first (sentinel nexus)"));
     else console.log("\n" + renderReport(s, { project: path.basename(process.cwd()) }) + "\n");
   }
+  else if (cmd === "changelog") {
+    // Release notes from git history, grouped by conventional-commit type.
+    const range = rest.filter((a) => !a.startsWith("--"))[0];
+    let rng = range;
+    if (!rng) { const t = await sh(["describe", "--tags", "--abbrev=0"]); const tag = (t.stdout || "").trim(); rng = tag ? tag + "..HEAD" : ""; }
+    const lg = await sh(["log", "--no-color", "--pretty=%h%x09%s"].concat(rng ? [rng] : ["-40"]));
+    const commits = parseCommits(lg.stdout || "");
+    if (rest.includes("--json")) console.log(JSON.stringify({ range: rng || "recent", commits }, null, 2));
+    else console.log(renderChangelog(commits, { title: "Changelog", range: rng || "recent" }));
+  }
   else if (cmd === "env") {
     // Headless env-var hygiene. --strict is a config gate: exit 1 if any env var is
     // used in code but absent from a .env template (common runtime vars excluded).
@@ -1396,6 +1406,8 @@ const { TAGS: TODO_TAGS, scanTree: scanTodos, summarizeTodos, rankTodos } = requ
 const { summarizeStats, rankedLangs, scanStats } = require("./lib/nexus/codestats"); // codebase overview (lib/nexus/codestats.js)
 const { auditDeps, scanImports } = require("./lib/nexus/deps"); // dependency hygiene audit (lib/nexus/deps.js)
 const { auditEnv, readEnvFiles, scanEnvTree } = require("./lib/nexus/envaudit"); // env-var hygiene audit (lib/nexus/envaudit.js)
+const { buildReviewPrompt, countBySeverity, SEVERITY } = require("./lib/nexus/review"); // multi-lens /ultrareview (lib/nexus/review.js)
+const { parseCommits, renderChangelog } = require("./lib/nexus/changelog"); // release-notes generator (lib/nexus/changelog.js)
 const { createBgJobs } = require("./lib/nexus/bgjobs"); // background command jobs (lib/bgjobs.js)
 const { describe: describeSettings } = require("./lib/cli/settings"); // /settings panel schema (lib/settings.js)
 // Extended device tools for the local agent: content search, file find, HTTP fetch,
@@ -1624,6 +1636,8 @@ function nexusTui(engine, cwd, nexusMd) {
     const oMsgs = nexusMd ? [{ role: "system", content: "You are Nexus, a concise expert coding assistant.\n" + nexusMd }] : [{ role: "system", content: "You are Nexus, a concise expert coding assistant." }];
     let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
     let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0, menuSel = 0; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom; menuSel = highlighted slash-menu row
+    let gitBranch = ""; // cached "branch" (+ "*" when the tree is dirty), shown in the status bar
+    const refreshGit = async () => { try { const b = await sh(["rev-parse", "--abbrev-ref", "HEAD"]); if (b.err) { gitBranch = ""; return; } const st = await sh(["status", "--porcelain"]); const next = (b.stdout || "").trim() + ((st.stdout || "").trim() ? "*" : ""); if (next !== gitBranch) { gitBranch = next; try { render(); } catch (_) {} } } catch (_) { gitBranch = ""; } };
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
     const compact = { on: false, f: 0, iv: null };
     const history = []; let hIdx = -1;
@@ -1692,6 +1706,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/model", "pick the model — lists the engine catalog; /model <name|number>"], ["/engine", "switch AI: claude · gemini · codex · opencode · aider · ollama"], ["/commands", "list custom project commands"],
       ["/agents", "run tasks in parallel: /agents a ;; b ;; c"], ["/mcp", "list / connect MCP servers"], ["/hooks", "show configured tool hooks"],
       ["/race", "run a prompt on every engine at once"], ["/review", "second opinion from a different engine"], ["/redo", "reapply an undone change"],
+      ["/ultrareview", "rigorous multi-lens review of the working diff (severity-ranked)"], ["/changelog", "release notes from git history, grouped by type"],
       ["/secrets", "scan the repo for leaked credentials"], ["/scan", "quick TCP port scan of a host"], ["/notify", "bell + desktop alert on long turns"],
       ["/watch", "run a cmd; auto-fix & re-run until it passes"], ["/commit", "AI commit message + commit the diff"], ["/diff", "colored word-level diff · /diff <file> · /diff --staged"],
       ["/pin", "keep a file in context every turn"], ["/pins", "list pinned files"], ["/unpin", "remove a pinned file"], ["/redact", "mask secrets before cloud sends"],
@@ -1835,7 +1850,9 @@ function nexusTui(engine, cwd, nexusMd) {
       const cells = 8, fill = Math.max(0, Math.min(cells, Math.round((pct / 100) * cells)));
       const pc = pct >= 80 ? red : pct >= 50 ? yellow : cyan;
       const bar = pc("▓".repeat(fill)) + gray("░".repeat(cells - fill));
-      const parts = [bold(sess.model || engine), gray("ctx ") + pc(pct + "%") + " " + bar, gray("↑") + fmtK(sess.inTok) + gray(" ↓") + fmtK(sess.outTok) + gray(" tok")];
+      const parts = [bold(sess.model || engine)];
+      if (gitBranch) parts.push(blue("⌥ " + gitBranch));
+      parts.push(gray("ctx ") + pc(pct + "%") + " " + bar, gray("↑") + fmtK(sess.inTok) + gray(" ↓") + fmtK(sess.outTok) + gray(" tok"));
       if (PAID[engine]) { const c = costCap && sess.cost >= costCap ? red : green; const est = !ENGINES[engine] || ENGINES[engine].kind !== "stream"; parts.push(sess.cost ? c((est ? "~$" : "$") + sess.cost.toFixed(4)) + (costCap ? gray("/" + costCap.toFixed(2)) : "") : gray("subscription")); }
       else parts.push(green("local · free"));
       if (runningShells) parts.push(yellow(runningShells + " shell" + (runningShells > 1 ? "s" : "")));
@@ -1990,7 +2007,7 @@ function nexusTui(engine, cwd, nexusMd) {
         try { saveSession(); } catch (_) {}
         if (hooks) try { runHooks(hooks, "Stop", { NEXUS_ENGINE: engine }, cwd); } catch (_) {}
         if (notify && (Date.now() - stat.t0) > 15000) { out.write("\x07"); try { _cp.spawn("notify-send", ["Nexus", "turn finished (" + ((Date.now() - stat.t0) / 1000 | 0) + "s)"], { stdio: "ignore" }).on("error", () => {}); } catch (_) {} }
-        maybeAutoCompact(); render();
+        maybeAutoCompact(); render(); refreshGit(); // a turn may have changed files -> refresh branch/dirty state
       };
       if (engine === "claude") {
         runClaudeStream(promptText, cwd, cont, {
@@ -2190,6 +2207,29 @@ function nexusTui(engine, cwd, nexusMd) {
         card.status = "ok"; card.end = Date.now(); ensureText().full = "second opinion (" + re + "):\n\n" + (out || "(no output)").trim(); busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
       })();
     };
+    // /ultrareview — a rigorous, multi-lens review of the working diff (correctness,
+    // security, performance, tests, maintainability) with severity-ranked findings,
+    // run on the strongest available engine.
+    const ultraReview = () => {
+      transcript.push({ role: "user", text: "/ultrareview" });
+      const block = { role: "nexus", items: [] }; transcript.push(block);
+      scroll = 0; busy = true; busyStart = Date.now(); busyWord = "Reviewing"; ctl = makeCtl();
+      const re = (!offline && engineAvail("claude")) ? "claude" : (offline ? "ollama" : engine);
+      const card = { type: "tool", id: "urv", name: "Task", label: "Task(ultrareview · " + re + ")", status: "run", start: Date.now() };
+      block.items.push(card); startTick(); render();
+      (async () => {
+        let diff = ""; let src = "working tree";
+        try { let d = await sh(["diff", "--no-color"]); diff = (d.stdout || "").trim(); if (!diff) { d = await sh(["diff", "--cached", "--no-color"]); diff = (d.stdout || "").trim(); src = "staged"; } if (!diff) { d = await sh(["diff", "--no-color", "HEAD~1"]); diff = (d.stdout || "").trim(); src = "last commit"; } } catch (_) {}
+        if (!diff) { card.status = "err"; card.end = Date.now(); ensureText().full = "nothing to review — no working, staged, or last-commit changes found (make some edits first)"; busy = false; ctl = null; render(); return; }
+        const prompt = buildReviewPrompt(diff);
+        let out; try { if (re === "ollama") { const mdl = pickCoderModel(await ollamaTags()); out = await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } else { out = (await runEngineTask(re, prompt, cwd, false, false, null, ctl)).output; } } catch (e) { out = "error: " + e.message; }
+        out = (out || "(no output)").trim();
+        const sv = countBySeverity(out); const tally = SEVERITY.filter((s) => sv[s]).map((s) => (s === "critical" || s === "high" ? red : s === "medium" ? yellow : gray)(sv[s] + " " + s)).join(gray(" · "));
+        card.status = "ok"; card.end = Date.now();
+        ensureText().full = bold("ultrareview") + gray("  " + re + " · " + src) + (tally ? "  " + tally : "  " + green("no issues flagged")) + "\n\n" + out;
+        busy = false; ctl = null; try { saveSession(); } catch (_) {} render();
+      })();
+    };
     // ask one engine a question (no file changes) — used by /ensemble
     const engineAnswer = async (e, prompt) => { try { if (e === "ollama") { const mdl = sess.model && sess.model !== engine ? sess.model : pickCoderModel(await ollamaTags()); return await ollamaChat(mdl, [{ role: "user", content: prompt }], undefined, aSignal(ctl)); } return (await runEngineTask(e, prompt, cwd, false, false, null, ctl, (cowork.on && e === "claude") ? cowork.weak : undefined)).output; } catch (err) { return "error: " + err.message; } };
     // /ensemble — run the prompt on every engine, then synthesize the single best answer
@@ -2324,7 +2364,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /todo · /stats · /deps · /env · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /ultrareview · /changelog · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /todo · /stats · /deps · /env · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         if (arg === "connect" || arg === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "connecting to MCP servers from .nexus/mcp.json…" }); }
@@ -2350,6 +2390,8 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/redo") { const r = redoStack.pop(); if (!r) transcript.push({ role: "system", text: "nothing to redo" }); else { const ok = nexusRestore(cwd, r.tree, r.paths); if (ok) checkpoints.push({ tree: r.tree, label: r.label, ts: Date.now(), paths: r.paths }); transcript.push({ role: "system", text: ok ? ("redid — reapplied the changes from \"" + r.label + "\"") : "redo failed (git error)" }); } }
       else if (cmd === "/race") { if (!argstr) transcript.push({ role: "system", text: "usage: /race <prompt>  — runs it on every available engine (claude/local/opencode) at once and shows all answers" }); else raceEngines(argstr); }
       else if (cmd === "/review") { reviewLast(arg); }
+      else if (cmd === "/ultrareview" || cmd === "/ur") { ultraReview(); }
+      else if (cmd === "/changelog") { (async () => { const range = arg && arg.trim() ? arg.trim() : null; let rng = range; if (!rng) { const t = await sh(["describe", "--tags", "--abbrev=0"]); const tag = (t.stdout || "").trim(); rng = tag ? tag + "..HEAD" : ""; } const lg = await sh(["log", "--no-color", "--pretty=%h%x09%s"].concat(rng ? [rng] : ["-40"])); const commits = parseCommits(lg.stdout || ""); const md = renderChangelog(commits, { title: "Changelog", range: rng || "recent" }); transcript.push({ role: "system", text: commits.length ? md : "no commits found" + (rng ? " in " + rng : "") }); render(); })(); }
       else if (cmd === "/secrets") { try { const files = _cp.execSync("git ls-files", { cwd, encoding: "utf8" }).split("\n").filter(Boolean).slice(0, 3000); const found = []; for (const f of files) { try { if (fs.statSync(path.join(cwd, f)).size > 400000) continue; const hits = scanSecrets(fs.readFileSync(path.join(cwd, f), "utf8")); if (hits.length) found.push("  " + f + " — " + hits.join(", ")); } catch (_) {} } transcript.push({ role: "system", text: found.length ? ("possible secrets found in tracked files:\n" + found.slice(0, 40).join("\n")) : "scanned tracked files — no obvious secrets found" }); } catch (_) { transcript.push({ role: "system", text: "/secrets needs a git repo (uses git ls-files)" }); } }
       else if (cmd === "/scan") { const host = arg || "127.0.0.1"; const COMMON = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 3389, 5432, 6379, 8080, 8443, 9000]; transcript.push({ role: "system", text: "scanning " + host + " (" + COMMON.length + " common TCP ports)…" }); render(); quickScan(host, COMMON).then((open) => { transcript.push({ role: "system", text: open.length ? ("open on " + host + ": " + open.join(", ")) : "no common ports open on " + host }); render(); }); }
       else if (cmd === "/notify") { notify = !notify; transcript.push({ role: "system", text: "completion notifications " + (notify ? "ON — a bell rings (and a desktop notification) when a turn over ~15s finishes, so you can step away" : "off") }); }
@@ -2604,6 +2646,7 @@ function nexusTui(engine, cwd, nexusMd) {
     // auto-connect MCP servers defined in .nexus/mcp.json (non-blocking)
     const connectMcp = async () => { const cfg = loadMcpConfig(cwd); if (!cfg) return; for (const nm of Object.keys(cfg)) { const c = await mcpConnect(nm, cfg[nm], cwd); mcpServers.push(c); if (!loading) render(); } };
     connectMcp();
+    refreshGit(); // populate the status-bar branch indicator
     process.stdin.on("data", (d) => { try {
       if (loading) { finishBoot(); return; }   // any key skips the intro
       const s = String(d);

@@ -49,6 +49,8 @@ lib/                   pure, testable logic in four domain subpackages
     codestats.js         codebase overview: files/lines/languages — /stats, sentinel stats
     deps.js              dependency hygiene: unused + undeclared imports — /deps, sentinel deps
     envaudit.js          env-var audit: code refs vs .env.example — /env, sentinel env
+    review.js            multi-lens code-review prompt builder — /ultrareview
+    changelog.js         release-notes generator from git history — /changelog, sentinel changelog
   governance/          enterprise policy, audit, cost & compliance
     policy.js            guardrails engine: policyCheck + tamper-evident audit chain
     security.js          scanSecrets / maskSecrets / classifyDanger / compactOutput
@@ -56,7 +58,7 @@ lib/                   pure, testable logic in four domain subpackages
     identity.js          operator/team resolution — SSO env -> config -> OS user
     compliance.js        signed audit+usage compliance bundle + verify (SOC2 export)
 test/
-  run.js               framework-free unit suite (npm test) — 383 assertions
+  run.js               framework-free unit suite (npm test) — 394 assertions
 .github/workflows/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
