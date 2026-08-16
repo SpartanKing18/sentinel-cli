@@ -1069,10 +1069,13 @@ async function aiCoder(argv) {
   const avail = {}; for (const e of ENGINE_ORDER) avail[e] = engineAvail(e);
   let engine = enginePref || cfg.engine || (avail.claude ? "claude" : "ollama");
   if (!avail[engine]) engine = "ollama";
-  if (tuiFlag) {
-    if (!process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
-    else return nexusTui(engine, cwd, nexusMd);
-  }
+  // The full-screen TUI is the default interactive experience now — the old
+  // line-based `sentinel nexus` REPL has been retired for interactive use. Fall
+  // through to the non-TUI path only for a one-shot task (`sentinel nexus
+  // "..."`), --print, or a non-interactive stdout.
+  const oneShot = parts.length > 0;
+  if (process.stdout.isTTY && !printMode && !oneShot) return nexusTui(engine, cwd, nexusMd);
+  if (tuiFlag && !process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
   let model = null, modelList = [];
   if (engine === "ollama") { modelList = await ollamaTags(); if (!modelList.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(modelList); }
   if (!printMode) {
@@ -1635,7 +1638,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const ident = resolveOperator({ cwd }); // operator/team for chargeback attribution + audit provenance
     const oMsgs = nexusMd ? [{ role: "system", content: "You are Nexus, a concise expert coding assistant.\n" + nexusMd }] : [{ role: "system", content: "You are Nexus, a concise expert coding assistant." }];
     let input = "", busy = false, cont = false, busyStart = 0, busyWord = "", tick = null;
-    let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0, menuSel = 0; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom; menuSel = highlighted slash-menu row
+    let expanded = false, mode = 1, runningShells = 0, activeAgents = 0, scroll = 0, menuSel = 0, mouseOn = true; // mode: 0 normal, 1 auto-accept, 2 plan; scroll = lines up from bottom; menuSel = highlighted slash-menu row; mouseOn = capture the mouse (wheel scroll) vs. release it so the terminal can select/copy text
     let gitBranch = ""; // cached "branch" (+ "*" when the tree is dirty), shown in the status bar
     const refreshGit = async () => { try { const b = await sh(["rev-parse", "--abbrev-ref", "HEAD"]); if (b.err) { gitBranch = ""; return; } const st = await sh(["status", "--porcelain"]); const next = (b.stdout || "").trim() + ((st.stdout || "").trim() ? "*" : ""); if (next !== gitBranch) { gitBranch = next; try { render(); } catch (_) {} } } catch (_) { gitBranch = ""; } };
     const MODES = [{ k: "normal", c: gray }, { k: "auto-accept", c: green }, { k: "plan", c: cyan }];
@@ -1686,6 +1689,14 @@ function nexusTui(engine, cwd, nexusMd) {
     let GRAD = THEMES.aurora.grad;
     const applyTheme = (name) => { const t = THEMES[name]; if (!t) return false; GRAD = t.grad; A.cyan = "\x1b[" + t.accent + "m"; return true; };
     try { const st = readGlobal("state.json", {}); if (st && st.theme && THEMES[st.theme]) applyTheme(st.theme); } catch (_) {} // restore last-used theme
+    // Named accent colors for /color, plus standalone accent/gradient overrides
+    // (independent of a full /theme). colorCode() also accepts a 0-255 code or
+    // #rrggbb (truecolor). Both overrides persist to state.json and are restored
+    // AFTER the theme below, so they win over the theme's own accent/gradient.
+    const COLORS = { red: "38;5;196", orange: "38;5;208", amber: "38;5;214", yellow: "38;5;226", gold: "38;5;220", lime: "38;5;118", green: "38;5;46", teal: "38;5;44", cyan: "38;5;51", sky: "38;5;117", blue: "38;5;39", indigo: "38;5;63", violet: "38;5;135", purple: "38;5;129", magenta: "38;5;201", pink: "38;5;213", rose: "38;5;211", white: "38;5;252", gray: "38;5;245" };
+    const colorCode = (v) => { if (!v) return null; if (COLORS[v]) return COLORS[v]; if (/^\d{1,3}$/.test(v) && +v <= 255) return "38;5;" + v; const h = v.replace(/^#/, ""); if (/^[0-9a-fA-F]{6}$/.test(h)) return "38;2;" + parseInt(h.slice(0, 2), 16) + ";" + parseInt(h.slice(2, 4), 16) + ";" + parseInt(h.slice(4, 6), 16); return null; };
+    const setAccent = (code) => { A.cyan = "\x1b[" + code + "m"; };
+    try { const st = readGlobal("state.json", {}) || {}; if (st.accent) setAccent(st.accent); if (Array.isArray(st.gradient) && st.gradient.length) GRAD = st.gradient; } catch (_) {}
     const gline = (s, i) => useColor ? "\x1b[1;" + GRAD[i % GRAD.length] + "m" + s + "\x1b[0m" : s;
     const ART = [
       "  ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
@@ -1715,7 +1726,9 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
       ["/cowork", "strong model codes, weak model does cheap work"], ["/cheap", "max-savings preset (lean + low effort)"], ["/lean", "ask for minimal output (saves output tokens)"], ["/style", "output style: concise·explanatory·review·tdd·secure·teacher"], ["/effort", "claude thinking level: low|medium|high"], ["/estimate", "rough token/cost of a prompt before sending"], ["/fallback", "auto-switch model on rate-limit"],
       ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/models", "list cloud & local models"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
-      ["/tree", "show the project file tree"], ["/theme", "change the color theme"], ["/offline", "local-only privacy lock"],
+      ["/tree", "show the project file tree"], ["/theme", "change the color theme"],
+      ["/color", "set the accent color · /color <name|0-255|#hex> · /color reset"], ["/colors", "list accent colors"], ["/gradient", "set the logo gradient · /gradient <theme|reset>"], ["/mouse", "toggle mouse capture · /mouse off to select & copy text"],
+      ["/offline", "local-only privacy lock"],
       ["/todo", "scan the project for TODO/FIXME/HACK markers (/todo <TAG> filters)"],
       ["/stats", "codebase overview: files, lines & languages, largest files"],
       ["/deps", "dependency hygiene: unused + undeclared package imports"],
@@ -1875,7 +1888,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const hint = () => {
       const C = cols();
       if (compact.on) { const n = 22, f = Math.min(n, compact.f); return clip("  " + yellow("Compacting conversation… ") + gray("[") + cyan("▓".repeat(f)) + gray("░".repeat(n - f)) + gray("] ") + Math.round((f / n) * 100) + "%", C - 2); }
-      if (slashMatches().length) return clip("  " + blue("↑↓") + gray("/wheel select  ") + blue("Tab") + gray(" complete  ") + blue("↵") + gray(" run  ") + blue("space") + gray(" dismiss"), C - 2);
+      if (slashMatches().length) return clip("  " + blue("↑↓") + gray("/PgUp·Dn/wheel select  ") + blue("Tab") + gray(" complete  ") + blue("↵") + gray(" run  ") + blue("space") + gray(" dismiss"), C - 2);
       if (scroll > 0) return clip("  " + yellow("↑ scrolled — " + scroll + " line" + (scroll > 1 ? "s" : "") + " below") + gray("  ·  ") + blue("PgUp/PgDn") + gray(" or wheel to scroll  ") + blue("End") + gray(" jump to latest"), C - 2);
       return clip("  " + blue("↵") + gray(" send  ") + blue("shift+tab") + gray(" mode  ") + blue("ctrl+o") + gray(" " + (expanded ? "collapse" : "expand")) + gray("  ") + blue("@") + gray("file ") + blue("!") + gray("sh ") + blue("#") + gray("note  ") + blue("/") + gray("cmds"), C - 2);
     };
@@ -2550,7 +2563,7 @@ function nexusTui(engine, cwd, nexusMd) {
         }).catch(() => { transcript.push({ role: "system", text: "could not reach Ollama for the local model list" }); render(); });
       }
       else if (cmd === "/recent") { try { let files = _cp.execSync("git log -12 --name-only --pretty=format:", { cwd, encoding: "utf8" }); let list = [...new Set(files.split("\n").filter(Boolean))]; if (!list.length) { try { list = [...new Set(_cp.execSync("git ls-files -m -o --exclude-standard", { cwd, encoding: "utf8" }).split("\n").filter(Boolean))]; } catch (_) {} } transcript.push({ role: "system", text: list.length ? ("recently changed files (last commits):\n" + list.slice(0, 30).map((f) => "  " + f).join("\n") + (list.length > 30 ? "\n  … +" + (list.length - 30) + " more" : "") + "\n(tip: /pin one to keep it in context)") : "no changes found" }); } catch (_) { transcript.push({ role: "system", text: "/recent needs a git repo" }); } }
-      else if (cmd === "/keys") transcript.push({ role: "system", text: "keys:\n  Enter          send   ·   \\ then Enter = newline\n  Shift+Tab      cycle mode (normal / auto-accept / plan)\n  Ctrl+O         expand tool detail   ·   Ctrl+C  stop turn (again = quit)\n  ↑ / ↓          input history   ·   Tab  complete /command or @path\n  wheel · PgUp/PgDn · Home/End   scroll\n  prefixes:  /command  ·  @file  ·  !shell  ·  #note" });
+      else if (cmd === "/keys") transcript.push({ role: "system", text: "keys:\n  Enter          send   ·   \\ then Enter = newline\n  Shift+Tab      cycle mode (normal / auto-accept / plan)\n  Ctrl+O         expand tool detail   ·   Ctrl+C  stop turn (again = quit)\n  ↑ / ↓          input history   ·   Tab  complete /command or @path\n  wheel · PgUp/PgDn · Home/End   scroll   (PgUp/PgDn also pages the / menu)\n  copy text:     /mouse off  (or hold Shift while selecting)\n  prefixes:  /command  ·  @file  ·  !shell  ·  #note" });
       else if (cmd === "/version" || cmd === "/about") transcript.push({ role: "system", text: "Nexus (sentinel " + VERSION + ") — the multi-engine AI coding agent. Engines: claude · ollama (local) · opencode. Type / for the command menu." });
       else if (cmd === "/docs" || cmd === "/doc" || cmd === "/help?") { const key = (arg || "").toLowerCase().replace(/^\//, ""); scroll = 0; if (!key) transcript.push({ role: "system", text: "docs — /docs <topic> (or /docs all):\n" + DOC_ORDER.map((k) => "  " + k.padEnd(12) + NEXUS_DOCS[k].title).join("\n") }); else if (key === "all") transcript.push({ role: "system", text: DOC_ORDER.map((k) => "── " + NEXUS_DOCS[k].title + " ──\n" + NEXUS_DOCS[k].body).join("\n\n") }); else { const d = NEXUS_DOCS[key] || Object.entries(NEXUS_DOCS).find(([k, v]) => k.startsWith(key) || v.title.toLowerCase().includes(key))?.[1]; transcript.push({ role: "system", text: d ? (d.title + "\n\n" + d.body) : ("no doc topic '" + key + "' — /docs to list topics") }); } }
       else if (cmd === "/impact") { const BLEND = 6; const avoided = (impact.localTok / 1e6) * BLEND; transcript.push({ role: "system", text: "Impact Receipt (this session):\n  local turns   " + impact.localTurns + "   free · ~" + fmtK(impact.localTok) + " tokens\n  cloud turns   " + impact.cloudTurns + "   ↑" + fmtK(impact.cloudInTok) + " ↓" + fmtK(impact.cloudOutTok) + " tok · $" + impact.cloudCost.toFixed(4) + "\n  cost avoided  ~$" + avoided.toFixed(4) + "   (est. if those local turns had run on the cloud @ ~$" + BLEND + "/M tokens)" + (cowork.on || impact.delegated ? "\n  cowork        " + impact.delegated + " task(s) delegated to " + (cowork.weak || "the weak model") + " · ~$" + impact.coworkSaved.toFixed(4) + " saved" : "") + "\n  net: spent $" + impact.cloudCost.toFixed(4) + ", avoided ~$" + (avoided + impact.coworkSaved).toFixed(4) }); }
@@ -2591,6 +2604,25 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/theme") {
         if (arg && THEMES[arg]) { applyTheme(arg); const st = readGlobal("state.json", {}) || {}; st.theme = arg; writeGlobal("state.json", st); transcript.push({ role: "system", text: "theme set to " + arg + " — recolored the accent, logo & boot gradient (saved)" }); }
         else { const sw = (t) => THEMES[t].grad.map((g) => "\x1b[" + g + "m█\x1b[0m").join(""); const list = Object.keys(THEMES).map((t) => "  " + (useColor ? sw(t) + "  " : "") + t).join("\n"); transcript.push({ role: "system", text: "themes (use /theme <name>):\n" + list }); }
+      }
+      else if (cmd === "/color") {
+        const a = (arg || "").trim().toLowerCase();
+        if (a === "reset") { const st = readGlobal("state.json", {}) || {}; delete st.accent; writeGlobal("state.json", st); setAccent((st.theme && THEMES[st.theme]) ? THEMES[st.theme].accent : THEMES.aurora.accent); transcript.push({ role: "system", text: "accent reset to the theme color (saved)" }); }
+        else if (a) { const code = colorCode(a); if (!code) transcript.push({ role: "system", text: "unknown color '" + a + "' — try a name (/colors), a 0-255 code, or #rrggbb" }); else { setAccent(code); const st = readGlobal("state.json", {}) || {}; st.accent = code; writeGlobal("state.json", st); transcript.push({ role: "system", text: "accent set to " + a + " " + cyan("●") + " — recolored highlights (saved)" }); } }
+        else { const sw = (c) => "\x1b[" + c + "m█████\x1b[0m"; transcript.push({ role: "system", text: "accent colors (use /color <name|0-255|#hex>, or /color reset):\n" + Object.entries(COLORS).map(([n, c]) => "  " + (useColor ? sw(c) + "  " : "") + n).join("\n") }); }
+      }
+      else if (cmd === "/colors") { const sw = (c) => "\x1b[" + c + "m█████\x1b[0m"; transcript.push({ role: "system", text: "accent colors (use /color <name>):\n" + Object.entries(COLORS).map(([n, c]) => "  " + (useColor ? sw(c) + "  " : "") + n).join("\n") }); }
+      else if (cmd === "/gradient") {
+        const a = (arg || "").trim().toLowerCase(); const st = readGlobal("state.json", {}) || {};
+        if (a === "reset") { delete st.gradient; writeGlobal("state.json", st); GRAD = (st.theme && THEMES[st.theme]) ? THEMES[st.theme].grad : THEMES.aurora.grad; transcript.push({ role: "system", text: "logo gradient reset to the theme (saved)" }); }
+        else if (a && THEMES[a]) { GRAD = THEMES[a].grad.slice(); st.gradient = GRAD; writeGlobal("state.json", st); transcript.push({ role: "system", text: "logo gradient set to " + a + " — " + GRAD.map((g) => "\x1b[" + g + "m█\x1b[0m").join("") + " (saved)" }); }
+        else { const sw = (t) => THEMES[t].grad.map((g) => "\x1b[" + g + "m█\x1b[0m").join(""); transcript.push({ role: "system", text: "logo gradients (use /gradient <name>, or /gradient reset):\n" + Object.keys(THEMES).map((t) => "  " + (useColor ? sw(t) + "  " : "") + t).join("\n") }); }
+      }
+      else if (cmd === "/mouse") {
+        const a = (arg || "").trim().toLowerCase();
+        const on = a === "on" ? true : a === "off" ? false : !mouseOn;
+        setMouse(on); const st = readGlobal("state.json", {}) || {}; st.mouse = on; writeGlobal("state.json", st);
+        transcript.push({ role: "system", text: on ? "mouse capture ON — wheel scrolls the transcript & slash menu. To select/copy text: /mouse off (or hold Shift while dragging)." : "mouse capture OFF — select & copy text natively now. Scroll with PgUp/PgDn · Home/End · ↑/↓ in the menu. /mouse on to re-enable wheel." });
       }
       else if (cmd === "/offline") { offline = !offline; if (offline && PAID[engine]) { engine = "ollama"; sess.model = "ollama"; sess.ctxWindow = CTXW.ollama || 8192; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "offline lock ON — switched to the local engine; cloud engines (claude/opencode) are blocked and nothing leaves this machine" }); } else transcript.push({ role: "system", text: offline ? "offline lock ON — cloud engines blocked; nothing leaves this machine" : "offline lock off — cloud engines allowed again" }); }
       else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
@@ -2635,7 +2667,9 @@ function nexusTui(engine, cwd, nexusMd) {
       else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
     };
     // ---- input / keys ----
-    out.write(ESC + "[?1049h" + ESC + "[?1000h" + ESC + "[?1006h" + ESC + "[?2004h" + ESC + "[?25l" + ESC + "[2J");
+    const setMouse = (on) => { mouseOn = on; try { out.write(on ? ESC + "[?1000h" + ESC + "[?1006h" : ESC + "[?1000l" + ESC + "[?1006l"); } catch (_) {} };
+    try { const st = readGlobal("state.json", {}) || {}; if (st.mouse === false) mouseOn = false; } catch (_) {} // restore mouse-capture preference
+    out.write(ESC + "[?1049h" + (mouseOn ? ESC + "[?1000h" + ESC + "[?1006h" : "") + ESC + "[?2004h" + ESC + "[?25l" + ESC + "[2J");
     try { process.stdin.setRawMode(true); } catch (_) {}
     process.stdin.resume(); process.stdin.setEncoding("utf8");
     let loading = true;
@@ -2655,8 +2689,8 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x0f") { expanded = !expanded; render(); return; }      // ctrl+o
       // ---- scrollback (works during a turn too) ----
       const page = Math.max(1, rows() - 6);
-      if (s === "\x1b[5~") { scroll += page; render(); return; }         // PageUp
-      if (s === "\x1b[6~") { scroll = Math.max(0, scroll - page); render(); return; } // PageDown
+      if (s === "\x1b[5~") { const mm = slashMatches(); if (mm.length) { menuSel = Math.max(0, menuSel - page); render(); return; } scroll += page; render(); return; }         // PageUp: page the slash menu when open, else scroll transcript
+      if (s === "\x1b[6~") { const mm = slashMatches(); if (mm.length) { menuSel = Math.min(mm.length - 1, menuSel + page); render(); return; } scroll = Math.max(0, scroll - page); render(); return; } // PageDown
       if (s === "\x1b[F" || s === "\x1b[4~" || s === "\x1bOF") { scroll = 0; render(); return; } // End -> latest
       if (s === "\x1b[1~" || s === "\x1bOH" || s === "\x1b[H") { scroll += 100000; render(); return; } // Home -> top (clamped in render)
       if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);\d+;\d+[Mm]/.exec(s); if (m) { const btn = +m[1]; const mm = slashMatches(); if (mm.length) { if (btn === 64) { menuSel = Math.max(0, menuSel - 1); render(); } else if (btn === 65) { menuSel = Math.min(mm.length - 1, menuSel + 1); render(); } } else { if (btn === 64) { scroll += 3; render(); } else if (btn === 65) { scroll = Math.max(0, scroll - 3); render(); } } } return; } // SGR mouse wheel — moves the slash menu when it's open, else scrolls the transcript
