@@ -63,6 +63,49 @@ test/
   ci.yml               node --check + npm test + CLI smoke on Node 18/20/22
 ```
 
+## Dispatch flow
+
+`process.argv` is read at the bottom of `sentinel.js`: `-v/--version` prints the
+version + detected engines; no args → `mainMenu()` (interactive menu); `--help` →
+`usage()` (rendered from `lib/cli/reference`); otherwise → `cli(args)`.
+
+`cli(args)` splits `[cmd, ...rest]` and routes in order:
+
+1. **Registry first** — if `CMD_MAP[cmd]` exists (`lib/cli/registry`), run it: the
+   ~19 pure/deterministic string-returning commands (uuid, hash, encode/decode,
+   defang, entropy, cidr, base32, epoch, urlparse, useragent, ports, dorks,
+   passphrase…), backed by `lib/toolkit/*`.
+2. **Async / network toolkit** — scan, dns, whois, headers, cert, subs, cve, fuzz,
+   git, totp, payloads, genpass, myip, ipinfo, serve, listen, tools, setup.
+3. **Governance & code-intel** — policy, audit, report, compliance, doctor, plus
+   changelog, env, deps, stats, todo → `lib/governance/*` and `lib/nexus/*`.
+4. **Nexus** (`nexus` | `code` | `ai`) — sub-router: init, docs, setup, login,
+   run/supervise/loop (autonomous multi-round), overnight, agents/parallel, or
+   default → `nexusTui()`, the raw-ANSI full-screen agent.
+
+```
+             process.argv (sentinel.js)
+                     |
+        +------------+------------------+---------------+
+     mainMenu     usage()            cli(args)  -- router
+                (lib/cli/reference)      |
+     +---------------+-----------------+------------------+
+     v               v                 v                  v
+  registry     async toolkit      governance         nexus dispatch
+ (lib/cli)     (scan/dns/cert...) (policy/audit/      -> nexusTui()
+     |                            report/compliance)        |
+     v                                  |            ENGINES registry (lib/nexus)
+ lib/toolkit/*                          v            args() -> spawn backend CLI
+                                 lib/governance/*     (claude/gemini/codex/ollama)
+```
+
+**Nexus tool loop.** Inside `nexusTui`, each turn runs via `runEngineTask` (spawns
+the chosen engine's CLI) or `ollamaExec` (in-process local loop). Every tool the
+model requests is **`policyCheck`-gated before it executes**, secret writes are
+blocked by `scanSecrets`, each enforced action is appended to the hash-chained
+`auditLog`, outbound text is masked in privacy mode, and one priced `usage` record
+is appended per turn.
+
 ## Design invariants (enforced by tests)
 
 - **Engine isolation.** A flag meant for one AI can never reach another: each
