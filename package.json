@@ -13,7 +13,8 @@
   "scripts": {
     "start": "node sentinel.js",
     "build": "pkg . --out-path dist",
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "postinstall": "node scripts/postinstall.js"
   },
   "pkg": {
     "targets": [
@@ -39,6 +40,7 @@
   "files": [
     "sentinel.js",
     "lib/",
-    "test/"
+    "test/",
+    "scripts/"
   ]
 }

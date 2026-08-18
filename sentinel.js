@@ -952,21 +952,23 @@ async function installOllama(log) { if (process.platform === "win32") { log("Win
 async function ensureOllamaServer(log) { if (await ollamaReachable()) return true; log("starting the Ollama server…"); try { require("child_process").spawn("ollama", ["serve"], { stdio: "ignore", detached: true }).unref(); } catch (_) {} for (let i = 0; i < 20; i++) { await new Promise((r) => setTimeout(r, 500)); if (await ollamaReachable()) return true; } return false; }
 async function ollamaPull(model, log) { log("pulling " + bold(model) + gray(" — several GB, this can take a while…")); return (await streamCmd("ollama", ["pull", model], log, false)) === 0; }
 function firstRunPending() { const st = readGlobal("state.json", null); return !st || !st.setupDone; }
+// The local models Nexus ships with — a strong coding model + an agentic/security
+// model. Override per-call via opts.models. Kept small so first-run stays sane.
+const USEFUL_MODELS = (process.env.SENTINEL_MODELS ? process.env.SENTINEL_MODELS.split(",").map((s) => s.trim()).filter(Boolean) : ["qwen2.5-coder", "hermes3"]);
 async function nexusSetup(opts) {
-  opts = opts || {}; const log = opts.log || ((s) => console.log("  " + s)); const model = opts.model || "qwen2.5-coder";
+  opts = opts || {}; const log = opts.log || ((s) => console.log("  " + s)); const models = opts.models || USEFUL_MODELS;
   log(bold("Nexus setup"));
   if (hasBin("claude")) log(green("● Claude Code detected") + gray(" — Nexus will use it headless by default, no config needed."));
   else log(gray("○ Claude Code not found — for the strongest engine: ") + cyan("npm i -g @anthropic-ai/claude-code"));
   const confirm = async (q) => opts.auto ? true : (opts.ask ? /^\s*(y|yes|)\s*$/i.test((await opts.ask(q)) || "") : true);
+  const pullUseful = async () => { const tags = await ollamaTags(); for (const m of models) { if (tags.some((t) => t === m || t.startsWith(m + ":"))) log(green("● " + m + " already installed")); else { await ensureOllamaServer(log); await ollamaPull(m, log); } } };
   if (hasBin("ollama")) {
     log(green("● Ollama detected")); await ensureOllamaServer(log);
-    const tags = await ollamaTags();
-    if (tags.some((t) => t === model || t.startsWith(model + ":"))) log(green("● " + model + " already installed"));
-    else if (await confirm("Pull " + model + " (local, free coding model)? [Y/n]")) { await ensureOllamaServer(log); await ollamaPull(model, log); }
+    if (await confirm("Pull the useful local models (" + models.join(", ") + ")? [Y/n]")) await pullUseful();
     else log(gray("skipped model download."));
-  } else if (await confirm("Ollama isn't installed. Install it now for free local models? [Y/n]")) {
-    if (await installOllama(log) && await ensureOllamaServer(log)) await ollamaPull(model, log);
-  } else log(gray("skipped — run ") + cyan("sentinel nexus setup") + gray(" anytime to install Ollama + a model."));
+  } else if (await confirm("Ollama isn't installed. Install it + the useful local models now? [Y/n]")) {
+    if (await installOllama(log) && await ensureOllamaServer(log)) await pullUseful();
+  } else log(gray("skipped — run ") + cyan("sentinel nexus setup") + gray(" anytime to install Ollama + models."));
   const st = readGlobal("state.json", {}) || {}; st.setupDone = true; st.setupTs = Date.now(); writeGlobal("state.json", st);
   log(green("setup complete."));
 }
@@ -1729,6 +1731,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"],
       ["/color", "set the accent color · /color <name|0-255|#hex> · /color reset"], ["/colors", "list accent colors"], ["/gradient", "set the logo gradient · /gradient <theme|reset>"], ["/mouse", "toggle mouse capture · /mouse off to select & copy text"],
       ["/hack", "offensive-security mode — pentest/CTF persona + the Sentinel toolkit"],
+      ["/ai-prompt", "AI rewrites & sharpens your prompt, then loads it to edit/send"],
       ["/offline", "local-only privacy lock"],
       ["/todo", "scan the project for TODO/FIXME/HACK markers (/todo <TAG> filters)"],
       ["/stats", "codebase overview: files, lines & languages, largest files"],
@@ -2550,6 +2553,22 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/style") { if (arg && styleMap[arg] !== undefined) { style = arg; transcript.push({ role: "system", text: "output style: " + bold(arg) + (arg === "default" ? "" : " — " + styleDir(arg)) + gray("  (applies to every engine)") }); } else transcript.push({ role: "system", text: "output styles (shape HOW the AI works — add your own as .nexus/styles/<name>.md):\n" + Object.keys(styleMap).map((n) => "  " + (n === style ? cyan("● " + n) : "  " + n) + gray(n === "default" ? "" : "  " + styleDir(n).slice(0, 60))).join("\n") + "\n  usage: /style <name>" }); }
       else if (cmd === "/effort") { if (["low", "medium", "high", "xhigh", "max"].includes(arg)) { effort = arg; transcript.push({ role: "system", text: "effort set to " + arg + " — the claude engine uses " + (arg === "low" ? "less thinking (fewer tokens, cheaper; good for mechanical work)" : arg === "high" || arg === "xhigh" || arg === "max" ? "more thinking (better on hard problems, more tokens)" : "the default thinking budget") + (engineCap(engine, "effort") ? "" : " · note: only claude uses effort; " + engine + " ignores it") }); } else if (arg === "off" || arg === "default") { effort = ""; transcript.push({ role: "system", text: "effort reset to the model default" }); } else transcript.push({ role: "system", text: "effort: " + (effort || "default") + ".  usage: /effort low|medium|high  (lower = fewer thinking tokens = cheaper)" }); }
       else if (cmd === "/hack") { hack = arg === "on" ? true : arg === "off" ? false : !hack; transcript.push({ role: "system", text: hack ? red("● HACK MODE") + " — Nexus is now an offensive-security specialist for AUTHORIZED engagements, with the full Sentinel toolkit (scan · dns · cert · subs · cve · payloads · revshell · dorks · jwt · hash · totp · encode …) available via run_command. Systems you own or are explicitly in-scope to test only. " + gray("/hack off to exit") : "hack mode OFF — back to the standard coding agent" }); }
+      else if (cmd === "/ai-prompt" || cmd === "/aiprompt") {
+        const raw = argstr.trim();
+        if (!raw) transcript.push({ role: "system", text: "usage: /ai-prompt <rough prompt> — the AI rewrites & sharpens it, then drops the result in your input box to edit or send" });
+        else {
+          const meta = "You are an expert prompt engineer for AI coding agents. Rewrite and strengthen the user's prompt below: make the intent explicit, add the constraints and acceptance criteria a strong engineer would assume, emphasize what matters most, and stay faithful and concise. Output ONLY the improved prompt — no preamble, no surrounding quotes, no explanation.\n\nUSER PROMPT:\n" + raw;
+          const blk = { role: "system", text: "sharpening your prompt…" }; transcript.push(blk);
+          busy = true; ctl = makeCtl(); scroll = 0; render();
+          engineAnswer(offline ? "ollama" : engine, meta).then((out) => {
+            busy = false; ctl = null;
+            const improved = (out || "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+            if (!improved || /^error:/i.test(improved)) { blk.text = "couldn't improve the prompt (" + (improved || "no response") + ")"; render(); return; }
+            blk.text = "sharpened prompt " + gray("(loaded into your input — edit, or press ↵ to run it)") + ":\n" + improved;
+            input = improved; render();
+          });
+        }
+      }
       else if (cmd === "/fallback") { if (arg === "off" || arg === "none") { fallback = ""; transcript.push({ role: "system", text: "fallback model cleared" }); } else if (arg) { fallback = arg; transcript.push({ role: "system", text: "fallback model set to " + arg + " — if the main model is rate-limited or unavailable, the claude engine automatically retries on it" + (engineCap(engine, "fallbackModel") ? "" : " · note: fallback applies to the claude engine") }); } else transcript.push({ role: "system", text: fallback ? ("fallback: " + fallback) : "no fallback set.  usage: /fallback <model>  (e.g. /fallback sonnet) — auto-switches when the main model is rate-limited" }); }
       else if (cmd === "/cheap") { lean = true; effort = "low"; transcript.push({ role: "system", text: "cheap mode ON — lean output + low effort (fewer output & thinking tokens). For maximum savings add a free local worker: /cowork " + (cowork.on ? cowork.strong : "opus") + " ollama:<local-model>  ·  or /engine ollama for fully free." }); }
       else if (cmd === "/estimate") { if (!argstr) transcript.push({ role: "system", text: "usage: /estimate <prompt> — rough token/cost estimate before you send it" }); else if (!PAID[engine]) transcript.push({ role: "system", text: "local engine — free (no token charges)" }); else { const inTok = Math.ceil(argstr.length / 4) + sess.ctxUsed; const outEst = lean ? 400 : 900; const mdl = cowork.on ? cowork.strong : sess.model; const pr = priceOf(mdl); const cost = (inTok / 1e6) * pr.in + (outEst / 1e6) * pr.out; transcript.push({ role: "system", text: "estimate on " + mdl + ": ~" + fmtK(inTok) + " input (your prompt + ~" + fmtK(sess.ctxUsed) + " current context) + ~" + outEst + " output  →  ~$" + cost.toFixed(4) + " (rough; " + (lean ? "lean on" : "add /lean to cut output") + ")" }); } }
