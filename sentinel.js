@@ -3,7 +3,7 @@
 /*!
  * Sentinel — Terminal Edition
  * A dependency-free CLI/TUI security console for Windows and Linux.
- * Uses only Node.js built-ins. MIT License. Copyright (c) 2026 Sentinel.
+ * Uses only Node.js built-ins. Copyright (c) 2026 Sentinel. All rights reserved.
  * Use only on systems you own or are explicitly authorized to test.
  */
 const net = require("net");
@@ -2814,7 +2814,7 @@ ${renderCommands(COMMAND_GROUPS, { color: cyan, cheats: Object.keys(CHEATS).join
     ${gray("$")} sentinel revshell bash 10.10.14.7 4444
     ${gray("$")} sentinel hash 'S3cr3t!'
 
-  ${gray("MIT licensed · use only on systems you are authorized to test.")}
+  ${gray("Use only on systems you are authorized to test.")}
 `);
 }
 

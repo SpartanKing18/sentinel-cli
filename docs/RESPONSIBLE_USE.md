@@ -37,6 +37,5 @@ than filing a public issue with exploit details.
 
 ---
 
-*This is a personal learning project built by a student, provided under the MIT
-License with no warranty. The author is not responsible for misuse. Use it to
+*This is a personal learning project built by a student, provided as-is with no warranty. The author is not responsible for misuse. Use it to
 learn, to defend, and to test only what you are allowed to test.*
