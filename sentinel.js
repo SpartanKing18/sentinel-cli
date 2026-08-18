@@ -611,6 +611,10 @@ async function cli(args) {
   else if (cmd === "headers") { const r = await headers(rest[0] || ""); if (r.err) { console.log(r.err); return; } console.log(r.status + " server:" + r.server); SEC.forEach(([k, label]) => console.log((r.h[k] !== undefined ? "[+] " : "[-] ") + label)); }
   else if (cmd === "cert") { const c = await certInspect(rest[0] || ""); if (!c.ok) { console.log(c.error); return; } console.log("Protocol " + c.protocol + " " + c.cipher); console.log("Subject  " + c.subject); console.log("Issuer   " + c.issuer); console.log("Valid    " + c.valid_from + " -> " + c.valid_to + (c.daysLeft != null ? " (" + c.daysLeft + "d left)" : "")); console.log("SAN      " + c.san); console.log("SHA-256  " + c.fp); }
   else if (cmd === "subs") { const r = await subs(rest[0] || ""); if (r.err) { console.log(r.err); return; } r.forEach((s) => console.log(s)); }
+  else if (cmd === "nmap") { const host = rest[0]; if (!host) return usage(); if (hasBin("nmap")) await runTool("nmap", rest.length > 1 ? rest : ["-T4", "-F", host]); else { console.log(yellow("nmap not installed — using Sentinel's native scanner instead.")); await scan(host, parsePorts(rest[1])); } }
+  else if (cmd === "nuclei") { const t = rest[0]; if (!t) return usage(); if (!hasBin("nuclei")) { console.log(red("nuclei not installed — get it: https://github.com/projectdiscovery/nuclei  (go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest)")); return; } await runTool("nuclei", ["-u", t, ...rest.slice(1)]); }
+  else if (cmd === "hashcat") { if (!hasBin("hashcat")) { console.log(red("hashcat not installed — apt install hashcat  /  brew install hashcat")); return; } const hf = rest[0], mode = rest[1]; if (!hf || !mode) { console.log("usage: sentinel hashcat <hashfile> <mode> [wordlist]\n  common modes:  0 MD5 · 100 SHA1 · 1400 SHA256 · 1700 SHA512 · 1800 sha512crypt · 3200 bcrypt · 1000 NTLM · 5600 NetNTLMv2 · 22000 WPA\n  straight/dictionary attack against the wordlist (rockyou by default)"); return; } await runTool("hashcat", ["-m", mode, "-a", "0", hf, rest[2] || "/usr/share/wordlists/rockyou.txt"]); }
+  else if (cmd === "subrecon") { if (!rest[0]) return usage(); await subrecon(rest[0]); }
   else if (cmd === "cve") await cveSearch(rest.join(" "));
   else if (cmd === "fuzz") await fuzz(rest[0], rest[1]);
   else if (cmd === "git") {
@@ -1186,6 +1190,35 @@ function hasBin(b) {
     for (const e of exts) { try { fs.accessSync(path.join(d, b + e), fs.constants.X_OK); return (_binCache[b] = true); } catch (_) {} }
   }
   return (_binCache[b] = false);
+}
+
+// Run an external tool with inherited stdio (streams its output live). Used by
+// the nmap / nuclei / hashcat wrappers.
+function runTool(bin, args) { return new Promise((res) => { let p; try { p = spawn(bin, args, { stdio: "inherit" }); } catch (e) { console.log(red(bin + ": " + e.message)); return res(1); } p.on("close", (c) => res(c || 0)); p.on("error", (e) => { console.log(red(bin + ": " + e.message)); res(1); }); }); }
+
+// Chained recon: passive subdomains (crt.sh) -> resolve A -> live HTTP probe.
+// Reuses the existing subs()/headers() primitives; concurrency-capped.
+async function subrecon(domain) {
+  domain = (domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (!domain) { console.log("usage: sentinel subrecon <domain>"); return; }
+  console.log(cyan("subrecon " + domain) + gray("  passive subdomains → resolve → live HTTP"));
+  let list = [];
+  try { const r = await subs(domain); if (Array.isArray(r)) list = r; else if (r && r.err) { console.log(r.err); return; } } catch (e) { console.log(red(String((e && e.message) || e))); return; }
+  list = [...new Set(list.map((s) => String(s).trim().toLowerCase()).filter(Boolean))];
+  if (!list.length) { console.log(gray("no subdomains found via crt.sh")); return; }
+  const cap = 80, targets = list.slice(0, cap);
+  console.log(gray(list.length + " found" + (list.length > cap ? " · probing first " + cap : "") + " …\n"));
+  const dnsp = require("dns").promises;
+  const check = async (h) => { let ip = ""; try { ip = ((await dnsp.resolve4(h)) || [])[0] || ""; } catch (_) {} let status = ""; if (ip) { for (const scheme of ["https", "http"]) { try { const r = await headers(scheme + "://" + h); if (r && !r.err && r.status) { status = scheme.toUpperCase() + " " + r.status; break; } } catch (_) {} } } return { h, ip, status }; };
+  const results = [], q = targets.slice();
+  await Promise.all(Array.from({ length: 12 }, async () => { let h; while ((h = q.shift()) !== undefined) results.push(await check(h)); }));
+  const live = results.filter((r) => r.status).sort((a, b) => a.h.localeCompare(b.h));
+  const resolved = results.filter((r) => r.ip && !r.status);
+  const dead = results.filter((r) => !r.ip);
+  console.log(green("● live (" + live.length + ")"));
+  live.forEach((r) => console.log("  " + r.h.padEnd(42) + gray(r.ip.padEnd(17)) + r.status));
+  if (resolved.length) { console.log(gray("\n○ resolves, no HTTP (" + resolved.length + ")")); resolved.slice(0, 40).forEach((r) => console.log("  " + gray(r.h.padEnd(42) + r.ip))); }
+  console.log(gray("\n" + dead.length + " did not resolve · " + list.length + " total subdomains"));
 }
 
 // Delegate a whole task to an external agent binary (claude / opencode). Streams output; returns {ok, output}.
