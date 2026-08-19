@@ -1140,7 +1140,7 @@ async function nexusSetup(opts) {
 }
 
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
-const { ollamaChat, ollamaTags, pickCoderModel } = require("./lib/nexus/ollama"); // local-model client (lib/ollama.js)
+const { ollamaChat, ollamaTags, pickCoderModel, apiConfigured, API_BASE } = require("./lib/nexus/ollama"); // local/any-model client (lib/ollama.js)
 const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
 function coderShell(command, cwd) {
   return new Promise((resolve) => {
@@ -1212,7 +1212,8 @@ function nexusHelp() {
   console.log("    /undo          revert last file change  /diff          list files changed this session");
   console.log("    /exit          quit\n");
   console.log("  " + gray("Attach a file to a task with @path  —  e.g.  fix the bug in @src/app.js") + "\n");
-  console.log("  " + bold("ENV") + "   SENTINEL_MODEL (default model) · OLLAMA_HOST / OLLAMA_PORT (remote Ollama)\n");
+  console.log("  " + bold("ENV") + "   SENTINEL_MODEL (default model) · OLLAMA_HOST / OLLAMA_PORT (remote Ollama)");
+  console.log("        " + gray("Any model: SENTINEL_API_BASE + SENTINEL_API_KEY point Nexus at any OpenAI-compatible API (OpenRouter, Groq, DeepSeek, vLLM…), or use /api in the TUI") + "\n");
   console.log("  " + gray("Nexus reads & writes files and runs commands in the current folder. Local models only — private.") + "\n");
 }
 
@@ -1233,10 +1234,16 @@ async function aiCoder(argv) {
     else parts.push(a);
   }
   let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "config.json"), "utf8")); } catch (_) {}
+  // Any-model support: an OpenAI-compatible endpoint (from .nexus/config.json or
+  // env) turns the local engine into a driver for ANY model. Env wins over config.
+  if (cfg.apiBase && !process.env.SENTINEL_API_BASE) process.env.SENTINEL_API_BASE = cfg.apiBase;
+  if (cfg.apiKey && !process.env.SENTINEL_API_KEY) process.env.SENTINEL_API_KEY = cfg.apiKey;
   let nexusMd = ""; try { nexusMd = fs.readFileSync(path.join(cwd, ".nexus", "NEXUS.md"), "utf8"); } catch (_) {}
   const avail = {}; for (const e of ENGINE_ORDER) avail[e] = engineAvail(e);
-  let engine = enginePref || cfg.engine || (avail.claude ? "claude" : "ollama");
-  if (!avail[engine]) engine = "ollama";
+  // "api" is an alias for the local tool loop pointed at the configured API.
+  if (enginePref === "api") { enginePref = "ollama"; if (!apiConfigured() && !cfg.apiModel) console.log("  " + yellow("note: no API configured — set SENTINEL_API_BASE (+ SENTINEL_API_KEY) or run /api <url> [model]")); }
+  let engine = enginePref || cfg.engine || (apiConfigured() ? "ollama" : (avail.claude ? "claude" : "ollama"));
+  if (engine !== "ollama" && !avail[engine]) engine = "ollama";
   // The full-screen TUI is the default interactive experience now — the old
   // line-based `sentinel nexus` REPL has been retired for interactive use. Fall
   // through to the non-TUI path only for a one-shot task (`sentinel nexus
@@ -1246,7 +1253,7 @@ async function aiCoder(argv) {
   if (process.stdout.isTTY && !printMode && !oneShot) return nexusTui(engine, cwd, nexusMd);
   if (tuiFlag && !process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
   let model = null, modelList = [];
-  if (engine === "ollama") { modelList = await ollamaTags(); if (!modelList.length) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(modelList); }
+  if (engine === "ollama") { modelList = await ollamaTags(); if (!modelList.length && !apiConfigured()) { if (!printMode) banner(); console.log("  " + red("No local model. Install Ollama + `ollama pull hermes3`, or use --engine claude.")); return; } model = modelOverride || cfg.apiModel || cfg.model || process.env.SENTINEL_MODEL || pickCoderModel(modelList); if (!model) { if (!printMode) banner(); console.log("  " + red(apiConfigured() ? "An API is set but no model — pass -m <model> (e.g. -m gpt-4o-mini) or set apiModel in .nexus/config.json." : "No local model. Install Ollama + `ollama pull hermes3`.")); return; } }
   if (!printMode) {
     banner();
     const W = 56, bx = (s) => cyan("│ ") + s + " ".repeat(Math.max(0, W - 1 - s.length)) + cyan("│");
@@ -1923,7 +1930,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
       ["/cowork", "strong model codes, weak model does cheap work"], ["/cheap", "max-savings preset (lean + low effort)"], ["/lean", "ask for minimal output (saves output tokens)"], ["/style", "output style: concise·explanatory·review·tdd·secure·teacher"], ["/effort", "claude thinking level: low|medium|high"], ["/estimate", "rough token/cost of a prompt before sending"], ["/fallback", "auto-switch model on rate-limit"],
-      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/savings", "cross-session cost-savings analysis + 30d projection"], ["/models", "list cloud & local models"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
+      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/savings", "cross-session cost-savings analysis + 30d projection"], ["/models", "list cloud & local models"], ["/api", "drive ANY model via an OpenAI-compatible API (OpenRouter, Groq, …)"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"],
       ["/color", "set the accent color · /color <name|0-255|#hex> · /color reset"], ["/colors", "list accent colors"], ["/gradient", "set the logo gradient · /gradient <theme|reset>"], ["/mouse", "toggle mouse capture · /mouse off to select & copy text"],
       ["/hack", "offensive-security mode — pentest/CTF persona + the Sentinel toolkit"],
@@ -2068,7 +2075,7 @@ function nexusTui(engine, cwd, nexusMd) {
       if (gitBranch) parts.push(blue("⌥ " + gitBranch));
       parts.push(gray("ctx ") + pc(pct + "%") + " " + bar, gray("↑") + fmtK(sess.inTok) + gray(" ↓") + fmtK(sess.outTok) + gray(" tok"));
       if (PAID[engine]) { const c = costCap && sess.cost >= costCap ? red : green; const est = !ENGINES[engine] || ENGINES[engine].kind !== "stream"; parts.push(sess.cost ? c((est ? "~$" : "$") + sess.cost.toFixed(4)) + (costCap ? gray("/" + costCap.toFixed(2)) : "") : gray("subscription")); }
-      else parts.push(green("local · free"));
+      else parts.push(apiConfigured() ? cyan("api") : green("local · free"));
       if (runningShells) parts.push(yellow(runningShells + " shell" + (runningShells > 1 ? "s" : "")));
       if (bgJobs.running()) parts.push(cyan(bgJobs.running() + " bg"));
       if (activeAgents) parts.push(mag(activeAgents + " agent" + (activeAgents > 1 ? "s" : "")));
@@ -2317,7 +2324,7 @@ function nexusTui(engine, cwd, nexusMd) {
           let mdl = process.env.SENTINEL_MODEL || (sess.model && sess.model !== engine ? sess.model : "");
           if (!mdl) { mdl = pickCoderModel(await ollamaTags()); }
           sess.model = mdl || engine;
-          if (!mdl) { ensureText().full = "No local model found. Install Ollama and pull one, e.g. `ollama pull hermes3`, or use /engine claude."; return finish({ output: "" }); }
+          if (!mdl) { ensureText().full = apiConfigured() ? "An API is configured but no model is set — run /model <name> (e.g. /model gpt-4o-mini), or /api <url> <model>." : "No local model found. Install Ollama and pull one, e.g. `ollama pull hermes3`, or use /engine claude."; return finish({ output: "" }); }
           let didTool = false, nudges = 0, filesThisTurn = 0; const readCache = {};
           for (let step = 1; step <= 30; step++) {
             if (ctl && ctl.stopped) { ensureText().full += (ensureText().full.trim() ? "\n" : "") + "(interrupted)"; break; }
@@ -2937,6 +2944,25 @@ function nexusTui(engine, cwd, nexusMd) {
         else show(eng.models || [], (eng.models && eng.models.length) ? "" : "(configured inside the tool)");
       }
       else if (cmd === "/expand") expanded = !expanded;
+      else if (cmd === "/api") {
+        const ps = (argstr || "").trim().split(/\s+/).filter(Boolean);
+        if (!ps.length) {
+          transcript.push({ role: "system", text: apiConfigured()
+            ? "Any-model API is ON\n  base   " + API_BASE() + "\n  model  " + (sess.model && sess.model !== engine ? sess.model : gray("(none — /model <name>)")) + "\n  key    " + (process.env.SENTINEL_API_KEY ? green("set") : yellow("not set — /api key <k>")) + "\n  /api off to go back to local Ollama"
+            : "Drive ANY model via an OpenAI-compatible API (OpenAI · OpenRouter · Groq · DeepSeek · Together · Mistral · LM Studio · vLLM · llama.cpp).\n  /api <base-url> [model]   e.g. /api https://openrouter.ai/api/v1 anthropic/claude-3.5-sonnet\n  /api key <your-key>       set the key for this session (or export SENTINEL_API_KEY)\n  /api off                  back to local Ollama\nCurrently: " + (engine === "ollama" ? "local Ollama" : engine) });
+        } else if (ps[0] === "off") {
+          delete process.env.SENTINEL_API_BASE; transcript.push({ role: "system", text: "API off — back to local Ollama." });
+        } else if (ps[0] === "key") {
+          if (ps[1]) { process.env.SENTINEL_API_KEY = ps[1]; transcript.push({ role: "system", text: "API key set for this session." }); }
+          else transcript.push({ role: "system", text: "usage: /api key <your-key>" });
+        } else {
+          let url = ps[0]; if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+          process.env.SENTINEL_API_BASE = url; engine = "ollama"; sess.ctxWindow = CTXW.ollama || 32768;
+          if (ps[1]) sess.model = ps[1];
+          transcript.push({ role: "system", text: "Any-model API set → " + url + (ps[1] ? "  · model " + ps[1] : "  " + yellow("(set one with /model <name>)")) + (process.env.SENTINEL_API_KEY ? "" : "\n  " + yellow("no key yet — /api key <your-key> or export SENTINEL_API_KEY")) });
+        }
+        render();
+      }
       else if (cmd === "/engine") {
         if (!arg) transcript.push({ role: "system", text: "engines (● installed):\n" + ENGINE_ORDER.map((e) => "  " + (engineAvail(e) ? green("●") : gray("○")) + " " + e + gray("  " + ENGINES[e].label + (ENGINES[e].paid ? "" : " · free")) + (e === engine ? "  " + cyan("(current)") : "")).join("\n") + "\nswitch with /engine <name>" });
         else if (!ENGINES[arg]) transcript.push({ role: "system", text: "unknown engine '" + arg + "' — options: " + ENGINE_ORDER.join(", ") });
