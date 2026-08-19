@@ -2112,7 +2112,8 @@ function nexusTui(engine, cwd, nexusMd) {
     };
     const slashMatches = () => { if (busy || input[0] !== "/" || /\s/.test(input)) return []; return fuzzyCmds(input); };
     let lastLines = null; // previous frame's rows, for line-level diffing
-    let clickZones = []; // rebuilt each render: [{row,c0,c1,cmd}] clickable button-bar hitboxes (1-indexed screen coords)
+    let clickZones = []; // rebuilt each render: [{row,c0,c1,kind,cmd}] clickable hitboxes (1-indexed screen coords)
+    let navOpen = false; // is the ⋯ status menu expanded?
     // Clickable status buttons (mouse) — one-tap access to cost/usage & more,
     // instead of only the passive metrics line. Each runs its slash command.
     const NAV_BUTTONS = [["Cost", "/status"], ["Savings", "/savings"], ["Impact", "/impact"], ["Models", "/models"], ["Settings", "/settings"], ["Help", "/help"]];
@@ -2142,23 +2143,28 @@ function nexusTui(engine, cwd, nexusMd) {
       const frame = [];
       for (let i = 0; i < bodyRows; i++) frame.push(" " + clip(view[i] || "", C - 2));
       frame.push(statusBar());
-      // clickable button bar — one-tap cost/usage & more (mouse). Record each
-      // button's screen-column span against this row so the mouse handler can
-      // map a left-click to its command.
+      // ⋯ status menu — a single click target that expands to one-tap actions
+      // (cost/usage & more). Collapsed by default so it stays out of the way.
+      // Record each hitbox's screen-column span against this row for the mouse
+      // handler. An action click closes the menu and jumps to the live chat.
       {
         clickZones = [];
         const btnRow = frame.length + 1; // 1-indexed screen row this bar occupies
-        let col = 3; // after a 2-space indent
-        let s = "  ";
-        for (const [label, cmd] of NAV_BUTTONS) {
-          const txt = " " + label + " ";
-          const width = txt.length + 2; // [ + text + ]
-          if (col + width > C - 2) break; // don't run off the edge
-          s += gray("[") + cyan(txt) + gray("]") + " ";
-          clickZones.push({ row: btnRow, c0: col, c1: col + width - 1, cmd });
-          col += width + 1;
+        const chip = (s2, col, label, extra) => { const txt = " " + label + " "; const width = txt.length + 2; s2.str += gray("[") + cyan(txt) + gray("]") + " "; clickZones.push(Object.assign({ row: btnRow, c0: col, c1: col + width - 1 }, extra)); return col + width + 1; };
+        const box = { str: "  " };
+        let col = 3;
+        if (!navOpen) {
+          col = chip(box, col, "...", { kind: "toggle" });
+          frame.push(box.str + dim(gray("menu — cost, savings & more")));
+        } else {
+          col = chip(box, col, "x", { kind: "close" });
+          for (const [label, cmd] of NAV_BUTTONS) {
+            const width = (" " + label + " ").length + 2;
+            if (col + width > C - 2) break; // don't run off the edge
+            col = chip(box, col, label, { kind: "run", cmd });
+          }
+          frame.push(box.str);
         }
-        frame.push(s + dim(gray("· click")));
       }
       for (let i = 0; i < menuRows; i++) { const idx = menuStart + i; const [nm, ds] = menu[idx]; const sel = idx === menuSel; const pos = (sel && menu.length > menuRows) ? gray("  (" + (menuSel + 1) + "/" + menu.length + ")") : ""; frame.push(clip((sel ? cyan(" › ") : "   ") + (sel ? bold(cyan(nm)) : cyan(nm)) + gray("  " + ds) + pos, C - 2)); }
       frame.push(gray("─".repeat(C)));
@@ -2979,13 +2985,14 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x03") { if (busy && ctl && ctl.kill) { ctl.kill(); transcript.push({ role: "system", text: "interrupting current turn…" }); render(); return; } cleanup(); resolve(); return; } // ctrl+c: stop turn if running, else quit
       if (s === "\x1b[Z") { mode = (mode + 1) % MODES.length; render(); return; } // shift+tab
       if (s === "\x0f") { expanded = !expanded; render(); return; }      // ctrl+o
+      if (s === "\x1b" && navOpen) { navOpen = false; render(); return; } // Esc closes the ⋯ status menu
       // ---- scrollback (works during a turn too) ----
       const page = Math.max(1, rows() - 6);
       if (s === "\x1b[5~") { const mm = slashMatches(); if (mm.length) { menuSel = Math.max(0, menuSel - page); render(); return; } scroll += page; render(); return; }         // PageUp: page the slash menu when open, else scroll transcript
       if (s === "\x1b[6~") { const mm = slashMatches(); if (mm.length) { menuSel = Math.min(mm.length - 1, menuSel + page); render(); return; } scroll = Math.max(0, scroll - page); render(); return; } // PageDown
       if (s === "\x1b[F" || s === "\x1b[4~" || s === "\x1bOF") { scroll = 0; render(); return; } // End -> latest
       if (s === "\x1b[1~" || s === "\x1bOH" || s === "\x1b[H") { scroll += 100000; render(); return; } // Home -> top (clamped in render)
-      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);(\d+);(\d+)([Mm])/.exec(s); if (m) { const btn = +m[1], mcol = +m[2], mrow = +m[3], press = m[4] === "M"; const mm = slashMatches(); if (btn === 64) { if (mm.length) menuSel = Math.max(0, menuSel - 1); else scroll += 3; render(); } else if (btn === 65) { if (mm.length) menuSel = Math.min(mm.length - 1, menuSel + 1); else scroll = Math.max(0, scroll - 3); render(); } else if (btn === 0 && press) { const z = clickZones.find((z) => z.row === mrow && mcol >= z.c0 && mcol <= z.c1); if (z) { handleSlash(z.cmd); render(); } } } return; } // SGR mouse: wheel scrolls / moves the slash menu · left-click hits a status button
+      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);(\d+);(\d+)([Mm])/.exec(s); if (m) { const btn = +m[1], mcol = +m[2], mrow = +m[3], press = m[4] === "M"; const mm = slashMatches(); if (btn === 64) { if (mm.length) menuSel = Math.max(0, menuSel - 1); else scroll += 3; render(); } else if (btn === 65) { if (mm.length) menuSel = Math.min(mm.length - 1, menuSel + 1); else scroll = Math.max(0, scroll - 3); render(); } else if (btn === 0 && press) { const z = clickZones.find((z) => z.row === mrow && mcol >= z.c0 && mcol <= z.c1); if (z) { if (z.kind === "toggle") { navOpen = true; render(); } else if (z.kind === "close") { navOpen = false; render(); } else if (z.kind === "run") { navOpen = false; input = ""; menuSel = 0; scroll = 0; handleSlash(z.cmd); render(); } } } } return; } // SGR mouse: wheel scrolls / moves the slash menu · left-click toggles the ⋯ menu / runs an action
       if (busy) return;                                                  // ignore typing mid-turn (scroll/interrupt/mode still work above)
       // ---- bracketed paste (handles multi-line pastes, possibly split across chunks) ----
       if (pasteBuf !== null || s.indexOf("\x1b[200~") !== -1) {
