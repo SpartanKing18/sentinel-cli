@@ -1621,6 +1621,7 @@ const { describe: describeSettings } = require("./lib/cli/settings"); // /settin
 // Extended device tools for the local agent: content search, file find, HTTP fetch,
 // system info, process list, and filesystem management. Returns a result object,
 // or null if `name` isn't a device tool (so the caller can fall through).
+const AGENT_TODOS = []; // the agent's live task checklist (todo_write), like Claude Code's TodoWrite
 async function deviceTool(name, a, cwd) {
   const fs = require("fs"), path = require("path"), os = require("os");
   const rp = (p) => { const r = path.resolve(cwd, p == null ? "." : p); if (r !== cwd && !r.startsWith(cwd + path.sep)) throw new Error("path escapes the project directory: " + p); return r; }; // sandbox all device-tool file ops to cwd
@@ -1652,6 +1653,42 @@ async function deviceTool(name, a, cwd) {
   if (name === "move" || name === "rename" || name === "move_file") { try { fs.renameSync(rp(a.from || a.src), rp(a.to || a.dest)); return { ok: true }; } catch (e) { return { error: e.message }; } }
   if (name === "copy" || name === "copy_file") { try { fs.copyFileSync(rp(a.from || a.src), rp(a.to || a.dest)); return { ok: true }; } catch (e) { return { error: e.message }; } }
   if (name === "delete" || name === "delete_file" || name === "rm") { try { fs.rmSync(rp(a.path), { recursive: !!a.recursive, force: true }); return { ok: true }; } catch (e) { return { error: e.message }; } }
+  if (name === "web_search" || name === "search_web" || name === "google") {
+    const q = a.query || a.q || a.pattern; if (!q) return { error: "web_search needs a query" };
+    return await new Promise((resolve) => {
+      try {
+        const https = require("https");
+        const req = https.request({ host: "html.duckduckgo.com", path: "/html/?q=" + encodeURIComponent(q), method: "GET", headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Nexus", "Accept": "text/html" }, timeout: 15000 }, (res) => {
+          let d = ""; res.on("data", (c) => { if (d.length < 400000) d += c; });
+          res.on("end", () => {
+            const strip = (s) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+            const deref = (u) => { const mm = /[?&]uddg=([^&]+)/.exec(u); return mm ? decodeURIComponent(mm[1]) : (u.startsWith("//") ? "https:" + u : u); };
+            const results = []; let m; const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+            while ((m = re.exec(d)) && results.length < 6) results.push({ title: strip(m[2]), url: deref(m[1]) });
+            const sn = []; let s2; const sre = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+            while ((s2 = sre.exec(d)) && sn.length < 6) sn.push(strip(s2[1]).slice(0, 220));
+            results.forEach((r, i) => { if (sn[i]) r.snippet = sn[i]; });
+            resolve(results.length ? { query: q, results } : { query: q, results: [], note: "no parseable results — try http_fetch on a specific URL" });
+          });
+        });
+        req.on("timeout", () => { req.destroy(); resolve({ error: "search timeout" }); });
+        req.on("error", (e) => resolve({ error: e.message })); req.end();
+      } catch (e) { resolve({ error: e.message }); }
+    });
+  }
+  if (name === "todo_write" || name === "todos" || name === "todo_list" || name === "write_todos") {
+    const items = Array.isArray(a.todos) ? a.todos : Array.isArray(a.items) ? a.items : Array.isArray(a.tasks) ? a.tasks : [];
+    AGENT_TODOS.length = 0;
+    for (const t of items) {
+      const content = typeof t === "string" ? t : (t.content || t.task || t.title || t.text || "");
+      const st = typeof t === "object" ? String(t.status || t.state || "pending") : "pending";
+      if (content) AGENT_TODOS.push({ content: String(content).slice(0, 200), status: /done|complete|finish/i.test(st) ? "done" : /prog|doing|active|current/i.test(st) ? "in_progress" : "pending" });
+    }
+    try { fs.mkdirSync(rp(".nexus"), { recursive: true }); fs.writeFileSync(rp(".nexus/todos.json"), JSON.stringify(AGENT_TODOS)); } catch (_) {}
+    const rendered = AGENT_TODOS.map((t) => (t.status === "done" ? "[x] " : t.status === "in_progress" ? "[~] " : "[ ] ") + t.content).join("\n");
+    return { ok: true, count: AGENT_TODOS.length, done: AGENT_TODOS.filter((t) => t.status === "done").length, todos: AGENT_TODOS, rendered };
+  }
+  if (name === "todo_read" || name === "read_todos" || name === "get_todos") return { todos: AGENT_TODOS, count: AGENT_TODOS.length };
   return null;
 }
 // Compact large tool output (keep head+tail, drop the middle) to save context tokens.
@@ -2316,10 +2353,10 @@ function nexusTui(engine, cwd, nexusMd) {
       } else { // ollama — LOCAL agent with full device access (read/write/edit/list/run_command)
         const mcps = mcpToolList();
         const extra = (mcps.length ? " MCP tools: " + mcps.map((m) => m.full + " — " + oneline(m.desc, 40)).join("; ") + "." : "") + " spawn_agents{tasks:[\"...\",\"...\"]} runs several INDEPENDENT sub-tasks in parallel via sub-agents and returns all their results — use it to split big work.";
-        if (oMsgs.length === 1) oMsgs[0].content = "You are Nexus, a local autonomous coding agent on the operator's own machine (cwd " + cwd + "). Accomplish the TASK by taking ONE action per step and reading each OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace}, list_dir{path?}, run_command{command} (full shell, blocks until done), run_background{command} (start a long-running command WITHOUT blocking — returns a jobId), check_background{id?} (poll a background job's output/status, or list all), stop_background{id} (kill a background job), search{pattern,path?} (grep file contents), find{glob,path?} (find files), http_fetch{url,method?} (network), sysinfo{} (OS/CPU/memory/disk), list_processes{filter?}, make_dir{path}, move{from,to}, copy{from,to}, delete{path}, remember{text} (save a DURABLE project convention/preference to NEXUS.md — only for lasting rules, not one-off facts), discover{query} (search available tools by keyword)." + extra + " Reply with exactly ONE JSON object: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Keep going until the task is fully done." + (lean ? " Be terse: short thoughts, minimal final summary." : "") + (styleDir(style) ? " " + styleDir(style) : "") + (hack ? " " + HACK_DIR : "") + (nexusMd ? "\n\nPROJECT (.nexus/NEXUS.md):\n" + nexusMd.slice(0, 4000) : "");
+        if (oMsgs.length === 1) oMsgs[0].content = "You are Nexus, a local autonomous coding agent on the operator's own machine (cwd " + cwd + "). Accomplish the TASK by taking ONE action per step and reading each OBSERVATION before the next. TOOLS: read_file{path}, write_file{path,content}, edit_file{path,find,replace}, list_dir{path?}, run_command{command} (full shell, blocks until done), run_background{command} (start a long-running command WITHOUT blocking — returns a jobId), check_background{id?} (poll a background job's output/status, or list all), stop_background{id} (kill a background job), search{pattern,path?} (grep file contents), find{glob,path?} (find files), http_fetch{url,method?} (fetch a URL), web_search{query} (search the web for current info/docs/examples), todo_write{todos:[{content,status:pending|in_progress|done}]} (maintain a live task checklist — plan multi-step work up front and check items off as you finish them), sysinfo{} (OS/CPU/memory/disk), list_processes{filter?}, make_dir{path}, move{from,to}, copy{from,to}, delete{path}, remember{text} (save a DURABLE project convention/preference to NEXUS.md — only for lasting rules, not one-off facts), discover{query} (search available tools by keyword)." + extra + " Reply with exactly ONE JSON object: {\"thought\",\"action\":\"tool\",\"tool\",\"args\"} or {\"thought\",\"action\":\"final\",\"final\"}. Keep going until the task is fully done." + (lean ? " Be terse: short thoughts, minimal final summary." : "") + (styleDir(style) ? " " + styleDir(style) : "") + (hack ? " " + HACK_DIR : "") + (nexusMd ? "\n\nPROJECT (.nexus/NEXUS.md):\n" + nexusMd.slice(0, 4000) : "");
         oMsgs.push({ role: "user", content: promptText });
         sess.inTok += Math.ceil(promptText.length / 4);
-        const olbl = (n, a) => n === "read_file" ? "Read(" + base(a.path) + ")" : n === "write_file" ? "Write(" + base(a.path) + ")" : n === "edit_file" ? "Update(" + base(a.path) + ")" : n === "run_command" ? "Bash(" + oneline(a.command, 40) + ")" : n === "run_background" ? "Background(" + oneline(a.command, 32) + ")" : n === "check_background" ? "CheckJob(" + (a.id || "all") + ")" : n === "stop_background" ? "StopJob(" + (a.id || "?") + ")" : n === "list_dir" ? "List(" + (a.path || ".") + ")" : (n === "search" || n === "grep") ? "Search(" + oneline(a.pattern || a.query, 30) + ")" : (n === "find" || n === "find_files" || n === "glob") ? "Find(" + oneline(a.glob || a.pattern || a.name, 30) + ")" : (n === "http_fetch" || n === "web_fetch" || n === "fetch_url" || n === "http") ? "Fetch(" + oneline(a.url, 36) + ")" : (n === "sysinfo" || n === "system_info") ? "Sysinfo()" : (n === "list_processes" || n === "ps") ? "Processes()" : (n === "make_dir" || n === "mkdir") ? "Mkdir(" + base(a.path) + ")" : (n === "move" || n === "rename" || n === "move_file") ? "Move(" + base(a.to || a.dest) + ")" : (n === "copy" || n === "copy_file") ? "Copy(" + base(a.to || a.dest) + ")" : (n === "delete" || n === "delete_file" || n === "rm") ? "Delete(" + base(a.path) + ")" : n === "spawn_agents" ? "Task(" + ((a.tasks || []).length) + " agents)" : n === "remember" ? "Remember(" + oneline(a.text || a.note || "", 34) + ")" : n === "discover" ? "Discover(" + oneline(a.query || a.q || "", 30) + ")" : String(n).startsWith("mcp__") ? String(n).replace(/^mcp__/, "").replace("__", ":") + "()" : n + "()";
+        const olbl = (n, a) => n === "read_file" ? "Read(" + base(a.path) + ")" : n === "write_file" ? "Write(" + base(a.path) + ")" : n === "edit_file" ? "Update(" + base(a.path) + ")" : n === "run_command" ? "Bash(" + oneline(a.command, 40) + ")" : n === "run_background" ? "Background(" + oneline(a.command, 32) + ")" : n === "check_background" ? "CheckJob(" + (a.id || "all") + ")" : n === "stop_background" ? "StopJob(" + (a.id || "?") + ")" : n === "list_dir" ? "List(" + (a.path || ".") + ")" : (n === "search" || n === "grep") ? "Search(" + oneline(a.pattern || a.query, 30) + ")" : (n === "find" || n === "find_files" || n === "glob") ? "Find(" + oneline(a.glob || a.pattern || a.name, 30) + ")" : (n === "http_fetch" || n === "web_fetch" || n === "fetch_url" || n === "http") ? "Fetch(" + oneline(a.url, 36) + ")" : (n === "web_search" || n === "search_web" || n === "google") ? "WebSearch(" + oneline(a.query || a.q, 30) + ")" : (n === "todo_write" || n === "todos" || n === "todo_list" || n === "write_todos") ? "Todo(" + ((a.todos || a.items || a.tasks || []).filter((t) => /done|complete/i.test((t && t.status) || "")).length) + "/" + ((a.todos || a.items || a.tasks || []).length) + ")" : (n === "sysinfo" || n === "system_info") ? "Sysinfo()" : (n === "list_processes" || n === "ps") ? "Processes()" : (n === "make_dir" || n === "mkdir") ? "Mkdir(" + base(a.path) + ")" : (n === "move" || n === "rename" || n === "move_file") ? "Move(" + base(a.to || a.dest) + ")" : (n === "copy" || n === "copy_file") ? "Copy(" + base(a.to || a.dest) + ")" : (n === "delete" || n === "delete_file" || n === "rm") ? "Delete(" + base(a.path) + ")" : n === "spawn_agents" ? "Task(" + ((a.tasks || []).length) + " agents)" : n === "remember" ? "Remember(" + oneline(a.text || a.note || "", 34) + ")" : n === "discover" ? "Discover(" + oneline(a.query || a.q || "", 30) + ")" : String(n).startsWith("mcp__") ? String(n).replace(/^mcp__/, "").replace("__", ":") + "()" : n + "()";
         (async () => {
           let mdl = process.env.SENTINEL_MODEL || (sess.model && sess.model !== engine ? sess.model : "");
           if (!mdl) { mdl = pickCoderModel(await ollamaTags()); }
