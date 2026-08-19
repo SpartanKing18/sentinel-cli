@@ -723,6 +723,31 @@ group("diceware passphrase");
   ok("entropy bits scale with words", passphraseBits(4) === Math.round(4 * Math.log2(WORDS.length)) && passphraseBits(6) > passphraseBits(4));
 }
 
+group("cost savers — squeeze + response cache");
+{
+  const { squeezeContext, cacheKey, cacheGet, cachePut, cacheClear, cacheStats } = require("../lib/nexus/costsave");
+  // dedupe: same big file block inlined twice → second replaced with a marker
+  const body = "x".repeat(200);
+  const dup = "--- pinned: a.js ---\n" + body + "\n--- end a.js ---\n\nquestion\n\n--- context: a.js ---\n" + body + "\n--- end a.js ---";
+  const sq = squeezeContext(dup);
+  ok("squeeze dedupes identical inlined blocks + reports savings", sq.text.includes("already shown above") && sq.text.indexOf(body) === sq.text.lastIndexOf(body) && sq.saved > 0);
+  ok("squeeze collapses blank runs + trailing spaces", squeezeContext("a  \n\n\n\nb").text === "a\n\nb");
+  ok("squeeze leaves clean small text untouched (no savings)", squeezeContext("hello world").saved === 0);
+  ok("cacheKey stable + sensitive to engine/model/prompt", cacheKey("ollama", "m", "p") === cacheKey("ollama", "m", "p") && cacheKey("ollama", "m", "p") !== cacheKey("ollama", "m2", "p") && cacheKey("ollama", "m", "p") !== cacheKey("ollama", "m", "p2"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nexus-cache-"));
+  const k = cacheKey("ollama", "m", "hi");
+  ok("cacheGet on empty → null", cacheGet(dir, k) === null);
+  cachePut(dir, k, { text: "answer", inTok: 100, outTok: 50, cost: 0.01, readonly: true, hits: 0, ts: 1 });
+  ok("cachePut + cacheGet round-trip", (cacheGet(dir, k) || {}).text === "answer");
+  ok("cacheGet honours TTL (expired → null)", (() => { const f = path.join(dir, ".nexus", "cache", k + ".json"); const past = new Date(Date.now() - 3600000); fs.utimesSync(f, past, past); return cacheGet(dir, k, 60000) === null && cacheGet(dir, k, 999999999) !== null; })());
+  cachePut(dir, k, { text: "answer", inTok: 100, outTok: 50, cost: 0.01, readonly: true, hits: 3, ts: 1 });
+  const st = cacheStats(dir);
+  ok("cacheStats tallies entries + hit-weighted savings", st.entries === 1 && st.hits === 3 && st.savedTok === 450 && Math.abs(st.savedCost - 0.03) < 1e-9);
+  cacheClear(dir);
+  ok("cacheClear wipes the cache dir", cacheGet(dir, k) === null && cacheStats(dir).entries === 0);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+}
+
 group("MCP catalog (/mcp add)");
 {
   const { MCP_CATALOG, catalogGet, catalogList, addServerToConfig, removeServerFromConfig } = require("../lib/nexus/mcp-catalog");
