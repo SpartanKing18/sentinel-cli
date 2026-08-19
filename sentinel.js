@@ -2112,6 +2112,10 @@ function nexusTui(engine, cwd, nexusMd) {
     };
     const slashMatches = () => { if (busy || input[0] !== "/" || /\s/.test(input)) return []; return fuzzyCmds(input); };
     let lastLines = null; // previous frame's rows, for line-level diffing
+    let clickZones = []; // rebuilt each render: [{row,c0,c1,cmd}] clickable button-bar hitboxes (1-indexed screen coords)
+    // Clickable status buttons (mouse) — one-tap access to cost/usage & more,
+    // instead of only the passive metrics line. Each runs its slash command.
+    const NAV_BUTTONS = [["Cost", "/status"], ["Savings", "/savings"], ["Impact", "/impact"], ["Models", "/models"], ["Settings", "/settings"], ["Help", "/help"]];
     let modelPick = []; // last catalog shown by /model, so /model <number> can pick from it
     const render = () => {
       const C = cols(), R = rows(), iw = Math.max(4, C - 3);
@@ -2125,7 +2129,7 @@ function nexusTui(engine, cwd, nexusMd) {
       // clamp input rows so the whole chrome always fits even on short terminals
       const maxIn = Math.max(1, R - 5 - menuRows);
       const inRows = Math.max(1, Math.min(wrapped.length, 8, maxIn));
-      const chrome = 1 /*status*/ + menuRows + 1 /*rule*/ + inRows + 1 /*rule*/ + 1 /*hint*/;
+      const chrome = 1 /*status*/ + 1 /*buttons*/ + menuRows + 1 /*rule*/ + inRows + 1 /*rule*/ + 1 /*hint*/;
       const bodyRows = Math.max(1, R - chrome);
       const lines = bodyLines();
       const maxScroll = Math.max(0, lines.length - bodyRows);
@@ -2138,6 +2142,24 @@ function nexusTui(engine, cwd, nexusMd) {
       const frame = [];
       for (let i = 0; i < bodyRows; i++) frame.push(" " + clip(view[i] || "", C - 2));
       frame.push(statusBar());
+      // clickable button bar — one-tap cost/usage & more (mouse). Record each
+      // button's screen-column span against this row so the mouse handler can
+      // map a left-click to its command.
+      {
+        clickZones = [];
+        const btnRow = frame.length + 1; // 1-indexed screen row this bar occupies
+        let col = 3; // after a 2-space indent
+        let s = "  ";
+        for (const [label, cmd] of NAV_BUTTONS) {
+          const txt = " " + label + " ";
+          const width = txt.length + 2; // [ + text + ]
+          if (col + width > C - 2) break; // don't run off the edge
+          s += gray("[") + cyan(txt) + gray("]") + " ";
+          clickZones.push({ row: btnRow, c0: col, c1: col + width - 1, cmd });
+          col += width + 1;
+        }
+        frame.push(s + dim(gray("· click")));
+      }
       for (let i = 0; i < menuRows; i++) { const idx = menuStart + i; const [nm, ds] = menu[idx]; const sel = idx === menuSel; const pos = (sel && menu.length > menuRows) ? gray("  (" + (menuSel + 1) + "/" + menu.length + ")") : ""; frame.push(clip((sel ? cyan(" › ") : "   ") + (sel ? bold(cyan(nm)) : cyan(nm)) + gray("  " + ds) + pos, C - 2)); }
       frame.push(gray("─".repeat(C)));
       const shown = wrapped.slice(Math.max(0, wrapped.length - inRows));
@@ -2963,7 +2985,7 @@ function nexusTui(engine, cwd, nexusMd) {
       if (s === "\x1b[6~") { const mm = slashMatches(); if (mm.length) { menuSel = Math.min(mm.length - 1, menuSel + page); render(); return; } scroll = Math.max(0, scroll - page); render(); return; } // PageDown
       if (s === "\x1b[F" || s === "\x1b[4~" || s === "\x1bOF") { scroll = 0; render(); return; } // End -> latest
       if (s === "\x1b[1~" || s === "\x1bOH" || s === "\x1b[H") { scroll += 100000; render(); return; } // Home -> top (clamped in render)
-      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);\d+;\d+[Mm]/.exec(s); if (m) { const btn = +m[1]; const mm = slashMatches(); if (mm.length) { if (btn === 64) { menuSel = Math.max(0, menuSel - 1); render(); } else if (btn === 65) { menuSel = Math.min(mm.length - 1, menuSel + 1); render(); } } else { if (btn === 64) { scroll += 3; render(); } else if (btn === 65) { scroll = Math.max(0, scroll - 3); render(); } } } return; } // SGR mouse wheel — moves the slash menu when it's open, else scrolls the transcript
+      if (s.charCodeAt(0) === 27 && s[1] === "[" && s[2] === "<") { const m = /\[<(\d+);(\d+);(\d+)([Mm])/.exec(s); if (m) { const btn = +m[1], mcol = +m[2], mrow = +m[3], press = m[4] === "M"; const mm = slashMatches(); if (btn === 64) { if (mm.length) menuSel = Math.max(0, menuSel - 1); else scroll += 3; render(); } else if (btn === 65) { if (mm.length) menuSel = Math.min(mm.length - 1, menuSel + 1); else scroll = Math.max(0, scroll - 3); render(); } else if (btn === 0 && press) { const z = clickZones.find((z) => z.row === mrow && mcol >= z.c0 && mcol <= z.c1); if (z) { handleSlash(z.cmd); render(); } } } return; } // SGR mouse: wheel scrolls / moves the slash menu · left-click hits a status button
       if (busy) return;                                                  // ignore typing mid-turn (scroll/interrupt/mode still work above)
       // ---- bracketed paste (handles multi-line pastes, possibly split across chunks) ----
       if (pasteBuf !== null || s.indexOf("\x1b[200~") !== -1) {
