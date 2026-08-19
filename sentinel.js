@@ -752,6 +752,38 @@ function listen(port) {
 }
 
 // ---------- one-shot CLI ----------
+// Self-update: if the CLI is a git checkout, fetch origin, show what's new, and
+// fast-forward (running `npm install` when deps changed). Returns a plain string
+// for both the `update` verb and the TUI `/update` command. { apply:false } only checks.
+function nexusUpdate(opts) {
+  const apply = !!(opts && opts.apply);
+  const cp = require("child_process"), fs = require("fs"), path = require("path");
+  const dir = __dirname;
+  const run = (c, a) => cp.spawnSync(c, a, { cwd: dir, encoding: "utf8", timeout: 60000 });
+  if (!fs.existsSync(path.join(dir, ".git"))) return "installed at " + dir + "\nnot a git checkout — update with:  npm install -g sentinel-cli@latest\n(or re-pull from wherever you cloned it)";
+  if (!hasBin("git")) return "git not found — install git to self-update, or reinstall the CLI.";
+  const f = run("git", ["fetch", "--quiet", "origin"]);
+  if (f.status !== 0) return "update check failed: " + (((f.stderr || "") + (f.error ? f.error.message : "")).trim() || "git fetch error");
+  const local = run("git", ["rev-parse", "HEAD"]).stdout.trim();
+  let remote = run("git", ["rev-parse", "@{u}"]).stdout.trim();
+  if (!remote) remote = run("git", ["rev-parse", "origin/main"]).stdout.trim();
+  if (!remote || local === remote) return "up to date — v" + VERSION + " is the latest (" + dir + ").";
+  const behind = run("git", ["rev-list", "--count", "HEAD.." + remote]).stdout.trim() || "?";
+  const log = run("git", ["log", "--oneline", "-6", "HEAD.." + remote]).stdout.trim();
+  const L = [behind + " update(s) available for v" + VERSION + ":"];
+  if (log) L.push(log.split("\n").map((l) => "  " + l).join("\n"));
+  if (!apply) { L.push("run  " + cyan("sentinel update") + "  (or  /update apply  in the TUI) to install."); return L.join("\n"); }
+  const dirty = run("git", ["status", "--porcelain"]).stdout.trim();
+  if (dirty) { L.push("can't auto-update — you have local changes in " + dir + ". Commit or stash them first."); return L.join("\n"); }
+  const pull = run("git", ["pull", "--ff-only", "--quiet"]);
+  if (pull.status !== 0) { L.push("update failed: " + (((pull.stderr || "") + (pull.error ? pull.error.message : "")).trim() || "git pull error")); return L.join("\n"); }
+  const changed = (run("git", ["diff", "--name-only", local, "HEAD"]).stdout) || "";
+  if (/package(-lock)?\.json/.test(changed) && hasBin("npm")) run("npm", ["install", "--silent", "--no-audit", "--no-fund"]);
+  let newV = VERSION; try { const m = fs.readFileSync(path.join(dir, "sentinel.js"), "utf8").match(/const VERSION = "([^"]+)"/); if (m) newV = m[1]; } catch (_) {}
+  L.push(green("updated") + " v" + VERSION + " → v" + newV + " — restart Nexus (" + cyan("/exit") + ", then " + cyan("sentinel nexus") + ") to load it.");
+  return L.join("\n");
+}
+
 async function cli(args) {
   const [cmd, ...rest] = args;
   if (CMD_MAP[cmd]) { console.log(CMD_MAP[cmd].run({ rest, c: { red, green, yellow, cyan, gray, bold } })); }
@@ -791,6 +823,7 @@ async function cli(args) {
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
   else if (cmd === "lab") { await labCmd(rest); }
+  else if (cmd === "update") { banner(); h1("Update Nexus / Sentinel CLI"); const check = rest.includes("--check") || rest.includes("-n"); console.log("  installed  " + gray(__dirname) + "\n  version    " + cyan("v" + VERSION) + "\n"); console.log("  " + nexusUpdate({ apply: !check }).split("\n").join("\n  ") + "\n"); }
   else if (cmd === "payloads") printPayloads(rest[0]);
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
@@ -2736,7 +2769,7 @@ function nexusTui(engine, cwd, nexusMd) {
       const argstr = sp === -1 ? "" : t.slice(sp + 1).trim();
       const arg = argstr.split(/\s+/)[0];
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
-      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /ultrareview · /changelog · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /todo · /stats · /deps · /env · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
+      if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /update /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /ultrareview · /changelog · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /todo · /stats · /deps · /env · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
       else if (cmd === "/mcp") {
         const ps = (argstr || "").trim().split(/\s+/).filter(Boolean); const sub = (ps[0] || "").toLowerCase();
@@ -2755,6 +2788,7 @@ function nexusTui(engine, cwd, nexusMd) {
       else if (cmd === "/agents" || cmd === "/parallel") { const tasks = argstr.split(/\s*;;\s*/).map((s) => s.trim()).filter(Boolean); if (tasks.length < 2) transcript.push({ role: "system", text: "usage: /agents <task 1> ;; <task 2> ;; …   — runs each task in parallel on the " + engine + " engine, each in its own isolated git worktree, then merges the changes back" }); else spawnAgents(tasks); }
       else if (cmd === "/hooks") { transcript.push({ role: "system", text: hooks ? ("hooks (.nexus/hooks.json) active for events: " + Object.keys(hooks).join(", ") + "\n  PreToolUse/PostToolUse run for the local engine; UserPromptSubmit & Stop run for every engine") : "no hooks configured. Create .nexus/hooks.json:\n  { \"PreToolUse\": [ { \"matcher\": \"run_command|write_file\", \"command\": \"echo $TOOL_NAME >> .nexus/audit.log\" } ] }\n  events: UserPromptSubmit · PreToolUse · PostToolUse · Stop  (non-zero exit on PreToolUse/UserPromptSubmit blocks the action)" }); }
       else if (cmd === "/status") transcript.push({ role: "system", text: "status:\n  engine   " + engine + (sess.model && sess.model !== engine ? " (" + sess.model + ")" : "") + "\n  dir      " + cwd + "\n  mode     " + MODES[mode].k + "\n  context  " + Math.round((sess.ctxUsed / (sess.ctxWindow || 1)) * 100) + "% of " + fmtK(sess.ctxWindow) + "\n  tokens   ↑" + fmtK(sess.inTok) + " ↓" + fmtK(sess.outTok) + (PAID[engine] ? (sess.cost ? " · $" + sess.cost.toFixed(4) : " · billed") : " · local · free") + "\n  budget   " + (costCap ? "$" + costCap.toFixed(2) + " cap" : "none") + "\n  undo     " + checkpoints.length + " checkpoint(s)" });
+      else if (cmd === "/update") { const apply = /\b(apply|now|-y|yes)\b/.test(argstr); transcript.push({ role: "system", text: (apply ? "" : "checking for updates…\n") + nexusUpdate({ apply }) }); }
       else if (cmd === "/doctor") transcript.push({ role: "system", text: "doctor:\n  claude CLI   " + (hasBin("claude") ? "found" : "not found (needed for the claude engine)") + "\n  opencode     " + (hasBin("opencode") ? "found" : "not found") + "\n  git          " + (hasBin("git") ? "found — /undo & checkpoints active" : "not found — /undo disabled") + "\n  node         " + process.version + "\n  ollama is checked live when you switch to it" });
       else if (cmd === "/resume") { try { const s = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "session.json"), "utf8")); transcript.length = 0; for (const b of s.transcript) transcript.push(b); if (s.sess) Object.assign(sess, s.sess); cont = true; scroll = 0; transcript.push({ role: "system", text: "resumed the saved session from " + new Date(s.ts).toLocaleString() }); } catch (_) { transcript.push({ role: "system", text: "no saved session to resume (sessions are saved to .nexus/session.json after each turn)" }); } }
       else if (cmd === "/export") { try { const L = ["# Nexus conversation", "", "_" + new Date().toLocaleString() + " · " + engine + " · " + cwd + "_", ""]; for (const m of transcript) { if (m.role === "user") L.push("## You", "", m.text, ""); else if (m.role === "nexus") { L.push("## Nexus", ""); for (const it of (m.items || [])) { if (it.type === "text") L.push(it.full); else if (it.type === "tool") L.push("- `" + it.label + "`"); } L.push(""); } else if (m.role === "system") L.push("> " + String(m.text).replace(/\n/g, " "), ""); } const fp = path.join(cwd, "nexus-" + new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + ".md"); fs.writeFileSync(fp, L.join("\n")); transcript.push({ role: "system", text: "exported conversation → " + path.relative(cwd, fp) }); } catch (e) { transcript.push({ role: "system", text: "export failed: " + e.message }); } }
