@@ -1610,14 +1610,16 @@ const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("./l
 // ---- permission rules (allow/deny) — a Claude-Code-style allowlist for the local agent ----
 // A rule is "tool", "tool:glob" (glob on the command/path/url), or "Bash(glob)" (= run_command),
 // plus "*" wildcard. deny wins over allow; an allow rule auto-approves & bypasses the Sentinel guard.
+// synonym → canonical tool name, so a rule written for any alias matches the tool
+// the agent actually invokes (e.g. rule "web_fetch" matches the invoked "http_fetch").
+const PERM_CANON = { run_command: "run_command", run_background: "run_command", bash: "run_command", shell: "run_command", cmd: "run_command", write_file: "write_file", write: "write_file", edit_file: "edit_file", edit: "edit_file", read_file: "read_file", read: "read_file", delete: "delete", delete_file: "delete", rm: "delete", http_fetch: "web_fetch", web_fetch: "web_fetch", fetch_url: "web_fetch", http: "web_fetch", web_search: "web_search", search_web: "web_search", google: "web_search" };
+const permCanon = (t) => PERM_CANON[String(t || "").toLowerCase()] || String(t || "").toLowerCase();
 function permMatch(rule, name, a) {
   let r = String(rule || "").trim(); if (!r) return false;
   const bm = /^Bash\((.*)\)$/i.exec(r); if (bm) r = "run_command:" + bm[1];
-  const ix = r.indexOf(":"); let rtool = (ix < 0 ? r : r.slice(0, ix)).toLowerCase(); const rpat = ix < 0 ? "" : r.slice(ix + 1);
-  const tool = name === "run_background" ? "run_command" : name;
-  const alias = { run_command: ["run_command", "bash", "shell", "cmd"], write_file: ["write_file", "write"], edit_file: ["edit_file", "edit"], read_file: ["read_file", "read"], delete: ["delete", "rm"], web_fetch: ["http_fetch", "web_fetch", "fetch_url"], web_search: ["web_search", "search_web"] };
-  const names = alias[tool] || [tool];
-  if (rtool !== "*" && !names.includes(rtool)) return false;
+  const ix = r.indexOf(":"); const rtool = ix < 0 ? r : r.slice(0, ix); const rpat = ix < 0 ? "" : r.slice(ix + 1);
+  const tool = name;
+  if (rtool.trim() !== "*" && permCanon(rtool) !== permCanon(tool)) return false;
   if (!rpat || rpat === "*") return true;
   const target = String(a.command || a.path || a.to || a.dest || a.url || a.query || "");
   if (rpat.includes("*")) { try { return new RegExp("^" + rpat.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")).test(target); } catch (_) { return false; } }
@@ -2295,7 +2297,7 @@ function nexusTui(engine, cwd, nexusMd) {
       let sendText = inlineAts(preText);
       if (pinned.size) { let pre = ""; for (const f of pinned) { try { pre += "\n\n--- pinned: " + f + " ---\n" + fs.readFileSync(path.resolve(cwd, f), "utf8").slice(0, 8000) + "\n--- end " + f + " ---"; } catch (_) {} } if (pre) sendText = pre + "\n\n" + sendText; }
       if (index && engine === "ollama") { const rel = retrieve(text, 3); if (rel.length) { let pre = ""; for (const f of rel) { try { pre += "\n\n--- context: " + f + " ---\n" + fs.readFileSync(path.resolve(cwd, f), "utf8").slice(0, 6000) + "\n--- end " + f + " ---"; } catch (_) {} } if (pre) { sendText = pre + "\n\n" + sendText; transcript.push({ role: "system", text: "auto-context: pulled " + rel.join(", ") + " from the index" }); } } }
-      if (redact && PAID[engine]) { const masked = maskSecrets(sendText); if (masked !== sendText) { const n = (masked.match(/\[redacted:/g) || []).length; transcript.push({ role: "system", text: "redacted " + n + " secret(s) before sending to " + engine + " (privacy mode on)" }); sendText = masked; } }
+      if (redact && (PAID[engine] || apiConfigured())) { const masked = maskSecrets(sendText); if (masked !== sendText) { const n = (masked.match(/\[redacted:/g) || []).length; transcript.push({ role: "system", text: "redacted " + n + " secret(s) before sending to " + (apiConfigured() ? "the remote API" : engine) + " (privacy mode on)" }); sendText = masked; } }
       if (lean) sendText = "[Be concise: minimal output, no preamble/recap/explanation unless asked, short code only.] " + sendText; // cut expensive output tokens
       const promptText = mode === 2 ? "Think step by step and produce a concise PLAN of what you would do. Do NOT modify any files yet.\n\n" + sendText : sendText;
       const block = { role: "nexus", items: [] }; transcript.push(block);
@@ -2995,7 +2997,7 @@ function nexusTui(engine, cwd, nexusMd) {
         setMouse(on); const st = readGlobal("state.json", {}) || {}; st.mouse = on; writeGlobal("state.json", st);
         transcript.push({ role: "system", text: on ? "mouse capture ON — wheel scrolls the transcript & slash menu. To select/copy text: /mouse off (or hold Shift while dragging)." : "mouse capture OFF — select & copy text natively now. Scroll with PgUp/PgDn · Home/End · ↑/↓ in the menu. /mouse on to re-enable wheel." });
       }
-      else if (cmd === "/offline") { offline = !offline; if (offline && PAID[engine]) { engine = "ollama"; sess.model = "ollama"; sess.ctxWindow = CTXW.ollama || 8192; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "offline lock ON — switched to the local engine; cloud engines (claude/opencode) are blocked and nothing leaves this machine" }); } else transcript.push({ role: "system", text: offline ? "offline lock ON — cloud engines blocked; nothing leaves this machine" : "offline lock off — cloud engines allowed again" }); }
+      else if (cmd === "/offline") { offline = !offline; if (offline && (PAID[engine] || apiConfigured())) { if (apiConfigured()) delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = "ollama"; sess.ctxWindow = CTXW.ollama || 8192; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "offline lock ON — switched to the local engine; cloud engines and remote APIs are blocked, nothing leaves this machine" }); } else transcript.push({ role: "system", text: offline ? "offline lock ON — cloud engines & remote APIs blocked; nothing leaves this machine" : "offline lock off — cloud engines allowed again" }); }
       else if (cmd === "/checkpoints") { transcript.push({ role: "system", text: checkpoints.length ? ("checkpoints (newest last):\n" + checkpoints.map((c, i) => "  #" + (i + 1) + "  " + c.label).join("\n") + "\n/undo restores the most recent") : "no checkpoints yet" }); }
       else if (cmd === "/init") { try { const dir = path.join(cwd, ".nexus"); fs.mkdirSync(dir, { recursive: true }); const md = path.join(dir, "NEXUS.md"), cfg = path.join(dir, "config.json"); const made = []; if (!fs.existsSync(md)) { fs.writeFileSync(md, "# Nexus project instructions\n\nNexus loads this file every session.\n\n## Project\n- (describe your project)\n\n## Conventions\n- (style, patterns to follow)\n\n## Build / run / test\n- (commands)\n"); made.push("NEXUS.md"); } if (!fs.existsSync(cfg)) { fs.writeFileSync(cfg, JSON.stringify({ engine, model: "" }, null, 2) + "\n"); made.push("config.json"); } if (gitignoreNexus(cwd)) made.push(".gitignore"); transcript.push({ role: "system", text: made.length ? "initialized .nexus/ (" + made.join(", ") + ") — edit NEXUS.md to give Nexus project context" : ".nexus/ already exists" }); } catch (e) { transcript.push({ role: "system", text: "init failed: " + e.message }); } }
       else if (cmd === "/login") {
@@ -3066,7 +3068,7 @@ function nexusTui(engine, cwd, nexusMd) {
         } else {
           let url = ps[0]; if (!/^https?:\/\//i.test(url)) url = "https://" + url;
           process.env.SENTINEL_API_BASE = url; engine = "ollama"; sess.ctxWindow = CTXW.ollama || 32768;
-          if (ps[1]) sess.model = ps[1];
+          sess.model = ps[1] || "ollama"; // clear any stale cloud model so the API auto-picks (or asks)
           transcript.push({ role: "system", text: "Any-model API set → " + url + (ps[1] ? "  · model " + ps[1] : "  " + yellow("(set one with /model <name>)")) + (process.env.SENTINEL_API_KEY ? "" : "\n  " + yellow("no key yet — /api key <your-key> or export SENTINEL_API_KEY")) });
         }
         render();
