@@ -746,6 +746,29 @@ group("usage ledger + chargeback report");
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
 }
 
+group("cost-savings analysis");
+{
+  const { analyzeSavings, renderSavings, MONEY } = require("../lib/governance/usage");
+  // One paid opus turn (heavy output) + one free local turn, across two days.
+  const recs = [
+    { ts: "2026-08-11T09:00:00Z", engine: "claude", model: "claude-opus-4-8", inTok: 1_000_000, outTok: 1_000_000, cost: 90 },
+    { ts: "2026-08-12T10:00:00Z", engine: "ollama", model: "qwen2.5-coder", inTok: 5000, outTok: 2000, cost: 0 },
+  ];
+  const a = analyzeSavings(recs);
+  ok("splits paid vs free turns", a.paidTurns === 1 && a.freeTurns === 1 && Math.round(a.paidCost) === 90);
+  ok("run-rate over 2 active days → 30d projection", a.activeDays === 2 && Math.round(a.dailyAvg) === 45 && Math.round(a.projected30) === 1350);
+  ok("local lever = fraction of paid cost (default 30%)", a.localFrac === 0.30 && Math.round(a.localSaved) === 27);
+  ok("mechanicalFraction override honored + clamped", Math.round(analyzeSavings(recs, { mechanicalFraction: 0.5 }).localSaved) === 45 && analyzeSavings(recs, { mechanicalFraction: 9 }).localFrac === 1);
+  // opus 1M in @ $15 + 1M out @ $75 = $90; same tokens on sonnet ($3/$15) = $18 → save $72.
+  const opus = a.byModel.find((m) => /opus/.test(m.model));
+  ok("opus downshifts to sonnet with correct saving", opus.downshift.to === "sonnet" && Math.round(opus.downshift.altCost) === 18 && Math.round(opus.downshift.saved) === 72);
+  ok("free/local model has no downshift", a.byModel.find((m) => /qwen/.test(m.model)).downshift === null);
+  ok("totalSavable = local + downshift", Math.round(a.totalSavable) === Math.round(a.localSaved + a.downshiftSaved));
+  const txt = renderSavings(a, { project: "acme" });
+  ok("renders headline + opportunities + downshift table", /cost-savings analysis — acme/.test(txt) && txt.includes("Run rate") && txt.includes("Local routing") && txt.includes("→ sonnet"));
+  ok("empty ledger → zeroed analysis, no crash", (() => { const z = analyzeSavings([]); return z.turns === 0 && z.totalSavable === 0 && z.activeDays === 1; })());
+}
+
 group("operator/team attribution");
 {
   const { resolveOperator } = require("../lib/governance/identity");
