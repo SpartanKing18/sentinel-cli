@@ -723,6 +723,21 @@ group("diceware passphrase");
   ok("entropy bits scale with words", passphraseBits(4) === Math.round(4 * Math.log2(WORDS.length)) && passphraseBits(6) > passphraseBits(4));
 }
 
+group("MCP catalog (/mcp add)");
+{
+  const { MCP_CATALOG, catalogGet, catalogList, addServerToConfig, removeServerFromConfig } = require("../lib/nexus/mcp-catalog");
+  ok("catalog non-empty + every entry has a valid spec", catalogList().length >= 10 && catalogList().every((k) => { const e = MCP_CATALOG[k]; return e && e.desc && e.spec && typeof e.spec.command === "string" && Array.isArray(e.spec.args); }));
+  ok("blender is present with the right runner", catalogGet("blender").spec.command === "uvx" && catalogGet("blender").spec.args.includes("blender-mcp"));
+  ok("catalogGet is case-insensitive + null on miss", !!catalogGet("BLENDER") && catalogGet("nope") === null);
+  const c1 = addServerToConfig({ mcpServers: { keepme: { command: "x" } } }, "playwright");
+  ok("addServerToConfig merges without clobbering existing", c1.mcpServers.keepme && c1.mcpServers.playwright && c1.mcpServers.playwright.command === "npx");
+  ok("addServerToConfig on unknown returns null", addServerToConfig({}, "nope") === null);
+  ok("addServerToConfig builds mcpServers when absent", addServerToConfig({}, "fetch").mcpServers.fetch.command === "uvx");
+  const c2 = removeServerFromConfig(c1, "playwright");
+  ok("removeServerFromConfig drops only the target", !c2.mcpServers.playwright && c2.mcpServers.keepme);
+  ok("needsEnv/note flagged where required (github token)", (catalogGet("github").needsEnv || []).includes("GITHUB_PERSONAL_ACCESS_TOKEN"));
+}
+
 group("usage ledger + chargeback report");
 {
   const { appendUsage, loadUsage, summarize, renderReport, MONEY, TOK } = require("../lib/governance/usage");
