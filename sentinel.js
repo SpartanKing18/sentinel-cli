@@ -32,7 +32,11 @@ const { totp, secondsRemaining } = require("./lib/toolkit/totp"); // TOTP 2FA co
 // ---------- data ----------
 const { SERVICES } = require("./lib/toolkit/ports"); // port<->service map, used by scan (lib/ports.js)
 const { digests, genPass } = require("./lib/toolkit/hashing"); // hash digests + password gen (lib/hashing.js)
-const { COMMAND_GROUPS, renderCommands } = require("./lib/cli/reference"); // help catalog = single source of truth (lib/reference.js)
+const { COMMAND_GROUPS, renderCommands, documentedVerbs } = require("./lib/cli/reference"); // help catalog = single source of truth (lib/reference.js)
+// Documented sentinel verbs NOT bridged into the Nexus TUI as /commands: they
+// block (server/listener), prompt for input, or already have a richer in-TUI
+// handler. Everything else documented becomes a slash command automatically.
+const NEXUS_NO_BRIDGE = new Set(["nexus", "code", "ai", "serve", "listen", "login", "setup", "git", "lab"]);
 const { parsePorts, idHash, parseCve } = require("./lib/toolkit/scanutil"); // security-console core logic (lib/scanutil.js)
 
 const { SHELLS, revshell } = require("./lib/toolkit/revshell"); // reverse-shell payloads (lib/revshell.js)
@@ -499,6 +503,105 @@ function labOne(id) {
   console.log("  login   " + t[5]);
 }
 
+// ---------- security lab: isolated targets + malware-detonation sandbox ----------
+// Docker targets bind to 127.0.0.1 only (never exposed to the LAN). Metasploitable
+// is a VM, guided into a host-only, no-internet network. The sandbox is an air-
+// gapped detonation recipe for samples YOU supply — nothing malicious ships here.
+const LAB_TARGETS = {
+  "metasploitable": { kind: "vm", name: "Metasploitable 2", note: "the classic deliberately-vulnerable Linux VM (Rapid7)",
+    url: "https://sourceforge.net/projects/metasploitable/files/Metasploitable2/" },
+  "juice-shop": { kind: "docker", name: "OWASP Juice Shop", image: "bkimminich/juice-shop", port: 3000, hostPort: 3000, note: "modern vulnerable web app" },
+  "dvwa": { kind: "docker", name: "DVWA", image: "vulnerables/web-dvwa", port: 80, hostPort: 8081, note: "Damn Vulnerable Web App" },
+  "webgoat": { kind: "docker", name: "WebGoat", image: "webgoat/webgoat", port: 8080, hostPort: 8082, note: "OWASP training app" },
+};
+
+async function labCmd(rest) {
+  const sub = (rest[0] || "").toLowerCase();
+  if (!sub) return labList();
+  if (sub === "doctor") return labDoctor();
+  if (sub === "up") return labUp(rest[1], rest.slice(2));
+  if (sub === "sandbox") return labSandbox();
+  if (sub === "down") return labDown(rest[1]);
+  if (PRACTICE.find((x) => x[0] === sub)) return labOne(sub);
+  if (LAB_TARGETS[sub]) return labUp(sub, rest.slice(1));
+  console.log("  " + red("unknown lab command") + gray("  — sentinel lab [doctor | up <target> | sandbox | down] · practice ids: " + PRACTICE.map((x) => x[0]).join(", ")));
+}
+
+function labDoctor() {
+  h1("Lab environment");
+  const rows = [["docker", "Docker", "quickest for web targets (juice-shop, dvwa, webgoat)"],
+    ["vboxmanage", "VirtualBox", "full VMs + host-only isolated networks + snapshots"],
+    ["qemu-system-x86_64", "QEMU/KVM", "full VMs (Linux virtualization)"],
+    ["vagrant", "Vagrant", "declarative VM provisioning + snapshots"]];
+  for (const [bin, name, note] of rows) { const ok = hasBin(bin) || hasBin(bin.toUpperCase()); console.log("  " + (ok ? green("✓") : gray("·")) + " " + bold(name.padEnd(12)) + (ok ? green("found") : gray("not found")) + gray("   " + note)); }
+  const anyVM = hasBin("vboxmanage") || hasBin("VBoxManage") || hasBin("qemu-system-x86_64");
+  const anyDocker = hasBin("docker");
+  console.log("");
+  if (anyDocker) console.log("  " + green("→ ") + bold("sentinel lab up juice-shop") + gray("   isolated web target (docker, 127.0.0.1 only)"));
+  if (anyVM) console.log("  " + green("→ ") + bold("sentinel lab up metasploitable") + gray("   isolated VM target (host-only network)"));
+  if (!anyVM && !anyDocker) console.log("  " + yellow("no hypervisor or Docker found") + gray(" — install Docker (light) or VirtualBox (full VMs), then re-run"));
+  console.log("  " + green("→ ") + bold("sentinel lab sandbox") + gray("   air-gapped malware-detonation recipe"));
+}
+
+function labUp(target, opts) {
+  opts = opts || [];
+  const t = LAB_TARGETS[String(target || "").toLowerCase()];
+  if (!t) { console.log("  " + red("unknown target — ") + gray("choose: " + Object.keys(LAB_TARGETS).join(", "))); return; }
+  const run = opts.includes("--run");
+  h1(t.name + gray("  — " + t.note));
+  if (t.kind === "docker") {
+    const cmd = "docker run --rm -d --name nexus-lab-" + target + " -p 127.0.0.1:" + t.hostPort + ":" + t.port + " " + t.image;
+    console.log("  " + gray("isolated launch (bound to loopback — not reachable from your LAN):"));
+    console.log("    " + bold(cmd));
+    console.log("  " + gray("then attack ") + cyan("http://127.0.0.1:" + t.hostPort) + gray("   ·  teardown: ") + "sentinel lab down " + target);
+    if (run) {
+      if (!hasBin("docker")) { console.log("\n  " + red("--run: docker not found") + gray(" — install Docker or run the command above yourself")); return; }
+      console.log("\n  " + gray("--run: starting…"));
+      const r = spawn("docker", ["run", "--rm", "-d", "--name", "nexus-lab-" + target, "-p", "127.0.0.1:" + t.hostPort + ":" + t.port, t.image], { stdio: "inherit" });
+      r.on("close", (c) => console.log(c ? red("  docker exited " + c) : green("  up → http://127.0.0.1:" + t.hostPort)));
+    } else {
+      console.log("  " + gray("add ") + "--run" + gray(" to launch it now (needs Docker)."));
+    }
+    return;
+  }
+  // VM target (Metasploitable): guide an isolated, offline import. Automated VM
+  // import is host-specific, so print exact steps rather than guess-executing.
+  console.log("  " + yellow("VM target — set up in an ISOLATED, host-only network (no internet route):"));
+  console.log("    1. Download the official image:  " + cyan(t.url));
+  console.log("    2. VirtualBox → Import, then set the VM's network to " + bold("Host-only Adapter") + gray("  (NOT NAT/Bridged — keeps it off the internet)"));
+  console.log("    3. Take a snapshot named " + bold("clean") + gray("  so you can revert after each session"));
+  console.log("    4. Boot it; default login " + bold("msfadmin / msfadmin") + gray("  — attack its host-only IP from your machine"));
+  console.log("  " + gray("Metasploit pairs with this: ") + "msfconsole" + gray("  ·  never bridge this VM to a real network."));
+}
+
+function labSandbox() {
+  h1("Malware-detonation sandbox" + gray("  — air-gapped; you supply the samples"));
+  console.log("  " + red("Safety model: ") + "isolated host-only network, a FAKE internet, disposable snapshots. Nothing malicious ships with Nexus — you bring your own sample and detonate it here, never on a real system or network.\n");
+  const stack = [
+    ["Isolation", "VirtualBox/QEMU host-only net (no NAT/bridge) + a snapshot you revert after every run"],
+    ["Fake internet", "INetSim or FakeNet-NG — malware 'phones home' to a simulated server, never the real net"],
+    ["Analyst VMs", "REMnux (Linux) + FLARE-VM (Windows) — the tooling workstations"],
+    ["Orchestration", "CAPEv2 or Cuckoo3 — submit a sample, auto-detonate in a throwaway VM, get a behavior report"],
+    ["Static/forensics", "YARA (classify) · CAPA (capabilities) · Volatility (memory) · CyberChef (offline)"],
+  ];
+  const w = Math.max.apply(null, stack.map((s) => s[0].length));
+  stack.forEach(([k, v]) => console.log("  " + bold(cyan(k.padEnd(w))) + "  " + v));
+  console.log("\n  " + gray("checklist: ") + "sentinel lab doctor" + gray("   ·  vulnerable practice targets: ") + "sentinel lab");
+  console.log("  " + gray("recommended flow: import REMnux → snapshot 'clean' → start INetSim → drop sample → detonate → revert snapshot."));
+}
+
+function labDown(target) {
+  h1("Lab teardown");
+  if (target && LAB_TARGETS[target] && LAB_TARGETS[target].kind === "docker") {
+    const cmd = "docker rm -f nexus-lab-" + target;
+    console.log("  " + bold(cmd));
+    if (hasBin("docker")) { const r = spawn("docker", ["rm", "-f", "nexus-lab-" + target], { stdio: "inherit" }); r.on("close", (c) => console.log(c ? gray("  (nothing to remove)") : green("  removed"))); }
+    return;
+  }
+  console.log("  docker targets:  " + bold("docker rm -f nexus-lab-<target>") + gray("   (or: docker ps → docker rm -f <id>)"));
+  console.log("  VM targets:      power off, then restore the " + bold("clean") + " snapshot to wipe any changes");
+}
+
 // ---------- payload library ----------
 const { PAYLOADS_CLI } = require("./lib/toolkit/payloads"); // attack-payload library (lib/payloads.js)
 function printPayloads(cls) {
@@ -572,6 +675,53 @@ function fileHash(f) {
   try { const buf = require("fs").readFileSync(f); h1("Hashes of " + f); ["md5", "sha1", "sha256", "sha512"].forEach((a) => console.log("  " + a.padEnd(8) + cyan(crypto.createHash(a).update(buf).digest("hex")))); }
   catch (e) { console.log(red("error: " + e.message)); }
 }
+// Headless Nexus: a loopback-only, token-gated JSON service so the app or any
+// script can drive Nexus programmatically. POST /run {goal} runs one headless
+// turn (via the real `nexus --print` path in a child, so engine behavior is
+// identical) and returns its output. Same safety shape as the honeypot bridge:
+// 127.0.0.1 only + Bearer token. `sentinel nexus serve [port]`.
+async function nexusServe(args, ctx) {
+  const crypto = require("crypto");
+  const port = parseInt((args || []).find((a) => /^\d+$/.test(a)) || process.env.SENTINEL_SERVE_PORT || "", 10) || 8765;
+  const token = process.env.SENTINEL_SERVE_TOKEN || crypto.randomBytes(24).toString("base64url");
+  const engineDefault = (ctx && ctx.engine) || "claude";
+  const srv = http.createServer((req, res) => {
+    const send = (code, obj) => { const b = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(b) }); res.end(b); };
+    const ra = req.socket.remoteAddress || "";
+    if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(ra)) return send(403, { error: "loopback only" }); // never expose to the network
+    const url = req.url.split("?")[0];
+    if (req.method === "GET" && url === "/health") return send(200, { ok: true, engine: engineDefault, version: VERSION });
+    if ((req.headers["authorization"] || "") !== "Bearer " + token) return send(401, { error: "unauthorized" });
+    if (req.method === "POST" && url === "/run") {
+      let body = ""; req.on("data", (d) => { body += d; if (body.length > 1e6) req.destroy(); });
+      req.on("end", () => {
+        let j = {}; try { j = JSON.parse(body || "{}"); } catch (_) { return send(400, { error: "bad json" }); }
+        const goal = String(j.goal || j.task || "").trim();
+        if (!goal) return send(400, { error: "missing 'goal'" });
+        const eng = String(j.engine || engineDefault);
+        const child = _cp.spawn(process.execPath, [__filename, "nexus", "--print", "-e", eng, goal], { cwd: process.cwd(), env: Object.assign({}, process.env, { NO_COLOR: "1" }) });
+        let out = "", err = ""; child.stdout.on("data", (b) => out += b); child.stderr.on("data", (b) => err += b);
+        child.on("close", (code) => send(code ? 500 : 200, { ok: !code, engine: eng, output: out.trim(), error: code ? (err.trim() || "nexus exited " + code) : undefined }));
+        child.on("error", (e) => send(500, { error: String((e && e.message) || e) }));
+      });
+      return;
+    }
+    send(404, { error: "not found — GET /health · POST /run {goal}" });
+  });
+  srv.on("error", (e) => { console.log(red("  serve failed: " + (e && e.message || e))); process.exit(1); });
+  srv.listen(port, "127.0.0.1", () => {
+    h1("Nexus headless service");
+    console.log("  " + green("listening ") + cyan("http://127.0.0.1:" + port) + gray("   (loopback only)"));
+    console.log("  engine    " + bold(engineDefault));
+    console.log("  token     " + bold(token) + gray("   (send as: Authorization: Bearer <token>)"));
+    console.log("");
+    console.log("  " + gray("health  ") + "curl http://127.0.0.1:" + port + "/health");
+    console.log("  " + gray("run     ") + "curl -s http://127.0.0.1:" + port + "/run -H 'Authorization: Bearer " + token + "' -d '{\"goal\":\"list the files here\"}'");
+    console.log("\n  " + gray("Ctrl-C to stop"));
+  });
+  await new Promise(() => {});
+}
+
 function serveDir(port, dir) {
   port = parseInt(port, 10) || 8000; dir = dir || ".";
   const fs = require("fs"), path = require("path");
@@ -640,7 +790,7 @@ async function cli(args) {
   }
   else if (cmd === "totp") { const secret = rest.join(" ").replace(/\s+/g, ""); const code = totp(secret); if (!code) { console.log(red("usage: sentinel totp <base32-secret>   — generate a TOTP 2FA code")); } else { console.log(bold(cyan(code))); const left = secondsRemaining(30); console.log(gray("  valid " + left + "s" + (left <= 5 ? " (expiring — a new code is imminent)" : ""))); } }
   else if (cmd === "hash") console.log(hashes(rest.join(" ")));
-  else if (cmd === "lab") { if (rest[0]) labOne(rest[0]); else labList(); }
+  else if (cmd === "lab") { await labCmd(rest); }
   else if (cmd === "payloads") printPayloads(rest[0]);
   else if (cmd === "genpass") console.log(genPass(rest[0]));
   else if (cmd === "myip") console.log(await myIp());
@@ -1091,6 +1241,7 @@ async function aiCoder(argv) {
   // line-based `sentinel nexus` REPL has been retired for interactive use. Fall
   // through to the non-TUI path only for a one-shot task (`sentinel nexus
   // "..."`), --print, or a non-interactive stdout.
+  if (parts[0] === "serve") return nexusServe(parts.slice(1), { engine });
   const oneShot = parts.length > 0;
   if (process.stdout.isTTY && !printMode && !oneShot) return nexusTui(engine, cwd, nexusMd);
   if (tuiFlag && !process.stdout.isTTY) console.log("  " + gray("--tui needs an interactive terminal."));
@@ -2764,6 +2915,24 @@ function nexusTui(engine, cwd, nexusMd) {
         else if (offline && ENGINES[arg].kind !== "local") transcript.push({ role: "system", text: "offline lock is ON — cloud engines are blocked. Turn it off with /offline first." });
         else if (!engineAvail(arg)) transcript.push({ role: "system", text: "'" + arg + "' (" + ENGINES[arg].label + ") isn't installed — install its CLI, then /engine " + arg });
         else { engine = arg; sess.model = arg; sess.userModel = false; sess.ctxWindow = CTXW[arg] || 200000; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; warned50 = false; cont = false; oMsgs.length = 1; transcript.push({ role: "system", text: "engine switched to " + arg + " (" + ENGINES[arg].label + ") — cost meter now tracks " + (PAID[arg] ? arg + " (billed)" : arg + " (local · free)") + "; fresh conversation" }); }
+      }
+      else if (documentedVerbs().has(cmd.slice(1)) && !NEXUS_NO_BRIDGE.has(cmd.slice(1))) {
+        // Bridge: run any documented `sentinel <verb>` as an in-Nexus /command, so
+        // nothing (report, savings, changelog, compliance, scan, cheats, …) has to
+        // be run outside Nexus. Runs the real CLI in a child (NO_COLOR, isolated,
+        // non-blocking) and drops its output into the transcript.
+        const verb = cmd.slice(1);
+        const blk = { role: "system", text: gray("$ sentinel " + verb + (argstr ? " " + argstr : "") + "  …") };
+        transcript.push(blk); scroll = 0; render();
+        try {
+          const child = _cp.spawn(process.execPath, [__filename, verb].concat(argstr ? argstr.split(/\s+/).filter(Boolean) : []),
+            { cwd, env: Object.assign({}, process.env, { NO_COLOR: "1", SENTINEL_IN_NEXUS: "1" }) });
+          let buf = "";
+          const cap = (b) => { buf += b; if (buf.length > 2e5) buf = buf.slice(-2e5); };
+          child.stdout.on("data", cap); child.stderr.on("data", cap);
+          child.on("close", (code) => { blk.text = (buf.trim() || "(no output)") + (code ? gray("\n[exit " + code + "]") : ""); render(); });
+          child.on("error", (e) => { blk.text = "failed to run `sentinel " + verb + "`: " + (e && e.message || e); render(); });
+        } catch (e) { blk.text = "failed: " + (e && e.message || e); render(); }
       }
       else transcript.push({ role: "system", text: "unknown command '" + cmd + "' — try /help" });
     };
