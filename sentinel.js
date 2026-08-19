@@ -1607,6 +1607,28 @@ async function runSubagents(engine, tasks, cwd, model, onProgress, ctl, pickMode
 }
 // Secret scanner — flags common leaked credentials in text/files (Nexus is a security tool).
 const { scanSecrets, maskSecrets, classifyDanger, compactOutput } = require("./lib/governance/security"); // security utils (lib/security.js)
+// ---- permission rules (allow/deny) — a Claude-Code-style allowlist for the local agent ----
+// A rule is "tool", "tool:glob" (glob on the command/path/url), or "Bash(glob)" (= run_command),
+// plus "*" wildcard. deny wins over allow; an allow rule auto-approves & bypasses the Sentinel guard.
+function permMatch(rule, name, a) {
+  let r = String(rule || "").trim(); if (!r) return false;
+  const bm = /^Bash\((.*)\)$/i.exec(r); if (bm) r = "run_command:" + bm[1];
+  const ix = r.indexOf(":"); let rtool = (ix < 0 ? r : r.slice(0, ix)).toLowerCase(); const rpat = ix < 0 ? "" : r.slice(ix + 1);
+  const tool = name === "run_background" ? "run_command" : name;
+  const alias = { run_command: ["run_command", "bash", "shell", "cmd"], write_file: ["write_file", "write"], edit_file: ["edit_file", "edit"], read_file: ["read_file", "read"], delete: ["delete", "rm"], web_fetch: ["http_fetch", "web_fetch", "fetch_url"], web_search: ["web_search", "search_web"] };
+  const names = alias[tool] || [tool];
+  if (rtool !== "*" && !names.includes(rtool)) return false;
+  if (!rpat || rpat === "*") return true;
+  const target = String(a.command || a.path || a.to || a.dest || a.url || a.query || "");
+  if (rpat.includes("*")) { try { return new RegExp("^" + rpat.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")).test(target); } catch (_) { return false; } }
+  return target.toLowerCase().includes(rpat.toLowerCase());
+}
+function permDecision(perms, name, a) {
+  if (!perms) return null;
+  for (const r of (perms.deny || [])) if (permMatch(r, name, a)) return "deny";
+  for (const r of (perms.allow || [])) if (permMatch(r, name, a)) return "allow";
+  return null;
+}
 const { allStyles } = require("./lib/cli/styles"); // output styles, built-in + .nexus/styles/*.md (lib/styles.js)
 const { mergeMemory } = require("./lib/nexus/memory"); // agent `remember` dedup (lib/memory.js)
 const { TOOL_CATALOG, discoverTools } = require("./lib/nexus/tools"); // agent tool catalog + discover (lib/tools.js)
@@ -1954,7 +1976,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/report", "cost & usage report for chargeback (/report json|save|since <date>)"],
       ["/compliance", "write a signed audit+usage compliance bundle (SOC2/review)"],
       ["/undo", "revert the last turn's file changes"], ["/rewind", "restore a specific checkpoint (/rewind N)"], ["/checkpoints", "list undo checkpoints"],
-      ["/resume", "reload the last saved session"], ["/export", "save the conversation to a markdown file"], ["/copy", "copy the last reply to the clipboard"],
+      ["/resume", "reload the last saved session"], ["/branch", "fork & switch conversation branches (/branch new <name>)"], ["/export", "save the conversation to a markdown file"], ["/copy", "copy the last reply to the clipboard"],
       ["/status", "session engine, model, tokens & cost"], ["/doctor", "check engines & tools are available"], ["/init", "scaffold .nexus/ in this project"],
       ["/model", "pick the model — lists the engine catalog; /model <name|number>"], ["/engine", "switch AI: claude · gemini · codex · opencode · aider · ollama"], ["/commands", "list custom project commands"],
       ["/agents", "run tasks in parallel: /agents a ;; b ;; c"], ["/mcp", "list / connect MCP servers"], ["/hooks", "show configured tool hooks"],
@@ -1967,7 +1989,7 @@ function nexusTui(engine, cwd, nexusMd) {
       ["/index", "index the repo for local auto-context"], ["/snippet", "save / use a prompt macro"], ["/snippets", "list saved prompt macros"],
       ["/plan", "make & run an editable task checklist"], ["/git", "branch, status & recent commits"], ["/blame", "who last changed a file's lines"],
       ["/cowork", "strong model codes, weak model does cheap work"], ["/cheap", "max-savings preset (lean + low effort)"], ["/lean", "ask for minimal output (saves output tokens)"], ["/style", "output style: concise·explanatory·review·tdd·secure·teacher"], ["/effort", "claude thinking level: low|medium|high"], ["/estimate", "rough token/cost of a prompt before sending"], ["/fallback", "auto-switch model on rate-limit"],
-      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/impact", "session savings (tokens & cost avoided)"], ["/savings", "cross-session cost-savings analysis + 30d projection"], ["/models", "list cloud & local models"], ["/api", "drive ANY model via an OpenAI-compatible API (OpenRouter, Groq, …)"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
+      ["/guard", "preflight destructive commands (enforce|warn|off)"], ["/permissions", "allow/deny tool rules — /allow /deny <rule>"], ["/impact", "session savings (tokens & cost avoided)"], ["/savings", "cross-session cost-savings analysis + 30d projection"], ["/models", "list cloud & local models"], ["/api", "drive ANY model via an OpenAI-compatible API (OpenRouter, Groq, …)"], ["/recent", "recently changed files"], ["/keys", "keyboard shortcuts"], ["/docs", "built-in documentation (/docs <topic>)"], ["/gaps", "list TODO/FIXME markers · /gaps plan"], ["/dream", "consolidate the session into NEXUS.md memory"],
       ["/tree", "show the project file tree"], ["/theme", "change the color theme"],
       ["/color", "set the accent color · /color <name|0-255|#hex> · /color reset"], ["/colors", "list accent colors"], ["/gradient", "set the logo gradient · /gradient <theme|reset>"], ["/mouse", "toggle mouse capture · /mouse off to select & copy text"],
       ["/hack", "offensive-security mode — pentest/CTF persona + the Sentinel toolkit"],
@@ -2158,6 +2180,9 @@ function nexusTui(engine, cwd, nexusMd) {
     let lastLines = null; // previous frame's rows, for line-level diffing
     let clickZones = []; // rebuilt each render: [{row,c0,c1,kind,cmd}] clickable hitboxes (1-indexed screen coords)
     let navOpen = false; // is the ⋯ status menu expanded?
+    let perms = { allow: [], deny: [] }; try { const p = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "permissions.json"), "utf8")); perms = { allow: p.allow || [], deny: p.deny || [] }; } catch (_) {} // permission allowlist
+    const savePerms = () => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "permissions.json"), JSON.stringify(perms, null, 2)); } catch (_) {} };
+    let curBranch = "main"; // conversation branch (session branching)
     // Clickable status buttons (mouse) — one-tap access to cost/usage & more,
     // instead of only the passive metrics line. Each runs its slash command.
     const NAV_BUTTONS = [["Cost", "/status"], ["Savings", "/savings"], ["Impact", "/impact"], ["Models", "/models"], ["Settings", "/settings"], ["Help", "/help"]];
@@ -2390,7 +2415,9 @@ function nexusTui(engine, cwd, nexusMd) {
             render();
             let result, blocked = false;
             if (mode === 2 && (["write_file", "edit_file", "run_command", "delete", "delete_file", "rm", "move", "move_file", "rename", "copy", "copy_file", "make_dir", "mkdir", "spawn_agents"].includes(name) || String(name).startsWith("mcp__"))) { result = { error: "plan mode is on — file/system changes are blocked. Describe the plan instead, then switch mode with shift+tab to execute." }; blocked = true; card.status = "err"; }
-            if (!blocked && (name === "run_command" || name === "run_background") && guard !== "off") { const d = classifyDanger(a.command); if (d.level === "block" && guard === "enforce") { result = { error: "BLOCKED by Sentinel guard: " + d.why + " (/guard off to allow, or run it yourself with !)" }; blocked = true; card.status = "err"; transcript.push({ role: "system", text: "Sentinel guard blocked a destructive command — " + d.why + ": " + oneline(a.command, 46) }); } else if (d.level !== "ok") transcript.push({ role: "system", text: "Sentinel: " + d.why + " — " + oneline(a.command, 46) + (d.level === "block" ? " (allowed; guard is " + guard + ")" : "") }); }
+            const _perm = permDecision(perms, name, a); // permission allowlist (/permissions)
+            if (!blocked && _perm === "deny") { result = { error: "denied by a permission rule (/permissions) — the operator disallowed this. They can /allow it or run it directly." }; blocked = true; card.status = "err"; transcript.push({ role: "system", text: "permission rule denied " + name + (a.command ? " (" + oneline(a.command, 40) + ")" : a.path ? " (" + a.path + ")" : "") }); }
+            if (!blocked && _perm !== "allow" && (name === "run_command" || name === "run_background") && guard !== "off") { const d = classifyDanger(a.command); if (d.level === "block" && guard === "enforce") { result = { error: "BLOCKED by Sentinel guard: " + d.why + " (/guard off to allow, or run it yourself with !)" }; blocked = true; card.status = "err"; transcript.push({ role: "system", text: "Sentinel guard blocked a destructive command — " + d.why + ": " + oneline(a.command, 46) }); } else if (d.level !== "ok") transcript.push({ role: "system", text: "Sentinel: " + d.why + " — " + oneline(a.command, 46) + (d.level === "block" ? " (allowed; guard is " + guard + ")" : "") }); }
             // ---- enterprise policy guardrails (.nexus/policy.json) ----
             if (!blocked) {
               const act = (name === "run_command" || name === "run_background") ? { type: "run", command: a.command }
@@ -2991,6 +3018,30 @@ function nexusTui(engine, cwd, nexusMd) {
         else show(eng.models || [], (eng.models && eng.models.length) ? "" : "(configured inside the tool)");
       }
       else if (cmd === "/expand") expanded = !expanded;
+      else if (cmd === "/permissions" || cmd === "/perms") {
+        if ((argstr || "").trim() === "clear") { perms = { allow: [], deny: [] }; savePerms(); transcript.push({ role: "system", text: "cleared all permission rules." }); }
+        else transcript.push({ role: "system", text: "permission rules " + gray("(.nexus/permissions.json)") + "\n  " + green("allow") + gray(" (auto-run, bypass guard): ") + (perms.allow.length ? perms.allow.join(", ") : gray("none")) + "\n  " + red("deny") + gray(" (block): ") + (perms.deny.length ? perms.deny.join(", ") : gray("none")) + "\n  " + gray("/allow <rule> · /deny <rule> · /permissions clear") + "\n  " + gray("rule = tool | tool:glob | Bash(glob) | *   e.g. /allow run_command:npm* · /deny Bash(rm *) · /allow read_file") });
+        render();
+      }
+      else if (cmd === "/allow" || cmd === "/deny") {
+        const rule = (argstr || "").trim();
+        if (!rule) transcript.push({ role: "system", text: "usage: " + cmd + " <rule>   e.g. " + cmd + " run_command:npm*   ·   " + cmd + " Bash(git *)   ·   " + cmd + " write_file" });
+        else { const list = cmd === "/allow" ? "allow" : "deny", other = cmd === "/allow" ? "deny" : "allow"; perms[other] = perms[other].filter((r) => r !== rule); if (!perms[list].includes(rule)) perms[list].push(rule); savePerms(); transcript.push({ role: "system", text: (cmd === "/allow" ? green("allow") : red("deny")) + ": " + rule + gray("  → .nexus/permissions.json") }); }
+        render();
+      }
+      else if (cmd === "/branch" || cmd === "/branches") {
+        const ps = (argstr || "").trim().split(/\s+/).filter(Boolean);
+        const bdir = path.join(cwd, ".nexus", "branches");
+        const bfile = (n) => path.join(bdir, String(n).replace(/[^\w.-]/g, "_") + ".json");
+        const listB = () => { try { return fs.readdirSync(bdir).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, "")); } catch (_) { return []; } };
+        const saveB = (n) => { try { fs.mkdirSync(bdir, { recursive: true }); fs.writeFileSync(bfile(n), JSON.stringify({ engine, model: sess.model, transcript, sess, oMsgs, ts: Date.now() })); return true; } catch (_) { return false; } };
+        const loadB = (n) => { try { const s = JSON.parse(fs.readFileSync(bfile(n), "utf8")); transcript.length = 0; for (const b of s.transcript) transcript.push(b); if (s.sess) Object.assign(sess, s.sess); if (Array.isArray(s.oMsgs)) { oMsgs.length = 0; for (const m of s.oMsgs) oMsgs.push(m); } return true; } catch (_) { return false; } };
+        if (!ps.length) { const bs = listB(); if (!bs.includes(curBranch)) bs.unshift(curBranch); transcript.push({ role: "system", text: "conversation branches:\n" + bs.map((b) => "  " + (b === curBranch ? cyan("● " + b) + gray("  (current)") : "  " + b)).join("\n") + "\n  " + gray("/branch new <name>   fork this conversation here") + "\n  " + gray("/branch <name>        switch (auto-saves the current branch first)") + "\n  " + gray("/branch delete <name>") }); }
+        else if (ps[0] === "new" && ps[1]) { saveB(curBranch); curBranch = ps[1]; saveB(curBranch); transcript.push({ role: "system", text: "forked → branch " + cyan(curBranch) + gray(" (a copy from here — explore freely; /branch <other> to switch back)") }); }
+        else if (ps[0] === "delete" && ps[1]) { if (ps[1] === curBranch) transcript.push({ role: "system", text: "can't delete the current branch — switch away first." }); else { try { fs.unlinkSync(bfile(ps[1])); transcript.push({ role: "system", text: "deleted branch " + ps[1] }); } catch (_) { transcript.push({ role: "system", text: "no branch '" + ps[1] + "'" }); } } }
+        else { const target = ps[0]; if (target === curBranch) transcript.push({ role: "system", text: "already on branch " + curBranch }); else if (!fs.existsSync(bfile(target))) transcript.push({ role: "system", text: "no branch '" + target + "' — /branch new " + target + " to create it" }); else { saveB(curBranch); if (loadB(target)) { curBranch = target; cont = false; scroll = 0; transcript.push({ role: "system", text: "switched to branch " + cyan(target) + gray(" — history restored; the engine context resets for cloud engines") }); } else transcript.push({ role: "system", text: "could not load branch '" + target + "'" }); } }
+        render();
+      }
       else if (cmd === "/api") {
         const ps = (argstr || "").trim().split(/\s+/).filter(Boolean);
         if (!ps.length) {
