@@ -1525,10 +1525,29 @@ function nexusRestore(cwd, tree, paths) {
     return true;
   } catch (_) { return false; }
 }
+// ---------- Workspace trust ----------
+// A repo's .nexus/mcp.json (MCP servers) and hooks.json BOTH run commands, so merely
+// launching Nexus inside an untrusted clone could execute arbitrary code. We only honor
+// them for repos the operator has explicitly trusted. Trust lives OUTSIDE the repo
+// (~/.sentinel/trusted-repos.json) so a malicious repo can't mark itself trusted.
+let _untrustedRepoConfig = false;
+function trustFile() { return require("path").join(sentinelHome(), "trusted-repos.json"); }
+function isRepoTrusted(cwd) {
+  if (process.env.SENTINEL_TRUST_REPO === "1") return true;
+  try { const list = JSON.parse(require("fs").readFileSync(trustFile(), "utf8")); return Array.isArray(list) && list.includes(require("path").resolve(cwd)); } catch (_) { return false; }
+}
+function trustRepo(cwd) {
+  try { const fs = require("fs"); let list = []; try { list = JSON.parse(fs.readFileSync(trustFile(), "utf8")); } catch (_) {} if (!Array.isArray(list)) list = []; const rp = require("path").resolve(cwd); if (!list.includes(rp)) list.push(rp); fs.writeFileSync(trustFile(), JSON.stringify(list, null, 2)); return true; } catch (_) { return false; }
+}
 // ---------- MCP (Model Context Protocol): minimal dependency-free JSON-RPC-2.0 stdio client ----------
 function loadMcpConfig(cwd) {
   const fs = require("fs"), path = require("path");
-  for (const f of [path.join(cwd, ".nexus", "mcp.json"), path.join(cwd, ".mcp.json")]) { try { const j = JSON.parse(fs.readFileSync(f, "utf8")); if (j && j.mcpServers && Object.keys(j.mcpServers).length) return j.mcpServers; } catch (_) {} }
+  for (const f of [path.join(cwd, ".nexus", "mcp.json"), path.join(cwd, ".mcp.json")]) {
+    try { const j = JSON.parse(fs.readFileSync(f, "utf8")); if (j && j.mcpServers && Object.keys(j.mcpServers).length) {
+      if (!isRepoTrusted(cwd)) { _untrustedRepoConfig = true; return null; }   // don't spawn servers from an untrusted repo
+      return j.mcpServers;
+    } } catch (_) {}
+  }
   return null;
 }
 function mcpConnect(name, spec, cwd) {
@@ -1550,7 +1569,7 @@ function mcpConnect(name, spec, cwd) {
   });
 }
 // ---------- Hooks: run project-defined shell commands around events (Claude-Code style) ----------
-function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try { return JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "hooks.json"), "utf8")); } catch (_) { return null; } }
+function loadHooks(cwd) { const fs = require("fs"), path = require("path"); try { const h = JSON.parse(fs.readFileSync(path.join(cwd, ".nexus", "hooks.json"), "utf8")); if (h && Object.keys(h).length && !isRepoTrusted(cwd)) { _untrustedRepoConfig = true; return null; } return h; } catch (_) { return null; } }
 
 // ================= enterprise guardrails: policy + audit =================
 // A declarative, per-project security policy the agent is HELD TO — protected
@@ -2013,6 +2032,7 @@ function nexusTui(engine, cwd, nexusMd) {
     ];
     const CMDS = [
       ["/help", "commands, input prefixes & keys"], ["/clear", "start a fresh chat"], ["/compact", "summarize & shrink the context"],
+      ["/trust", "trust this workspace's .nexus MCP servers + hooks"],
       ["/context", "show token / context usage"], ["/cost", "session token cost so far"], ["/budget", "set a spend cap in USD"],
       ["/report", "cost & usage report for chargeback (/report json|save|since <date>)"],
       ["/compliance", "write a signed audit+usage compliance bundle (SOC2/review)"],
@@ -2773,6 +2793,10 @@ function nexusTui(engine, cwd, nexusMd) {
       if (customCmds[cmd]) { let body = customCmds[cmd].body.replace(/\$ARGUMENTS/g, argstr).replace(/\$(\d+)/g, (_, n) => argstr.split(/\s+/)[+n - 1] || ""); submit(body); return; }
       if (cmd === "/help") transcript.push({ role: "system", text: "core:  /help /clear /compact /context /cost /budget /undo /redo /rewind /checkpoints /resume /export /copy /status /doctor /update /init /model /engine /commands /expand /exit\nsave-cost:  /cheap (preset) · /cowork (strong+weak) · /lean · /effort low · /estimate · /index · /budget · /report (chargeback) · /compliance (SOC2 bundle) · /impact\nunique:  /race · /ensemble · /bench · /review · /ultrareview · /changelog · /watch · /plan · /guard · /gaps · /dream · /commit · /models · /recent · /keys · /diff · /git · /blame · /explain · /test · /index · /todo · /stats · /deps · /env · /snippet · /pin · /secrets · /scan · /agents a ;; b · /tree · /theme · /offline · /redact\ninput:  @file (Tab-completes paths) · !cmd shell · #note memory · end a line with \\ for a newline · MCP & /hooks from .nexus/\nkeys:  shift+tab mode · ctrl+o expand · ctrl+c stop · ↑/↓ history · wheel/PgUp/PgDn/Home/End scroll · / menu" });
       else if (cmd === "/commands") { const ks = Object.keys(customCmds); transcript.push({ role: "system", text: ks.length ? ("custom commands (from .nexus/commands or .claude/commands):\n" + ks.map((k) => "  " + k + "  " + customCmds[k].desc.replace(/ \(custom\)$/, "")).join("\n")) : "no custom commands yet — add a file like .nexus/commands/review.md, then use /review" }); }
+      else if (cmd === "/trust") {
+        if (trustRepo(cwd)) { _untrustedRepoConfig = false; mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "trusted this workspace (" + gray(cwd) + ") — its .nexus MCP servers now load; hooks apply on next launch." }); }
+        else transcript.push({ role: "system", text: red("could not record trust") });
+      }
       else if (cmd === "/mcp") {
         const ps = (argstr || "").trim().split(/\s+/).filter(Boolean); const sub = (ps[0] || "").toLowerCase();
         const writeMcp = (cfg) => { try { fs.mkdirSync(path.join(cwd, ".nexus"), { recursive: true }); fs.writeFileSync(path.join(cwd, ".nexus", "mcp.json"), JSON.stringify(cfg, null, 2)); return true; } catch (_) { return false; } };
@@ -2780,7 +2804,7 @@ function nexusTui(engine, cwd, nexusMd) {
         else if (sub === "add") {
           const name = (ps[1] || "").toLowerCase(); const e = catalogGet(name);
           if (!e) transcript.push({ role: "system", text: name ? ("unknown catalog server '" + name + "' — /mcp catalog to browse") : "usage: /mcp add <name>   (see /mcp catalog)" });
-          else { const cfg = addServerToConfig({ mcpServers: loadMcpConfig(cwd) || {} }, name); if (writeMcp(cfg)) { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "added " + cyan(name) + " → .nexus/mcp.json" + (e.needsEnv ? "\n  " + yellow("set env first: " + e.needsEnv.join(", ")) : "") + (e.note ? "\n  " + gray("note: " + e.note) : "") + "\n  connecting…  " + gray("(first run may npx/uvx-install the server)") }); } else transcript.push({ role: "system", text: "could not write .nexus/mcp.json" }); }
+          else { const cfg = addServerToConfig({ mcpServers: loadMcpConfig(cwd) || {} }, name); if (writeMcp(cfg)) { trustRepo(cwd); _untrustedRepoConfig = false; mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "added " + cyan(name) + " → .nexus/mcp.json" + (e.needsEnv ? "\n  " + yellow("set env first: " + e.needsEnv.join(", ")) : "") + (e.note ? "\n  " + gray("note: " + e.note) : "") + "\n  connecting…  " + gray("(first run may npx/uvx-install the server)") }); } else transcript.push({ role: "system", text: "could not write .nexus/mcp.json" }); }
         }
         else if (sub === "remove" || sub === "rm") { const name = (ps[1] || "").toLowerCase(); const cur = loadMcpConfig(cwd) || {}; if (!cur[name]) transcript.push({ role: "system", text: "no server '" + name + "' in .nexus/mcp.json" }); else { writeMcp(removeServerFromConfig({ mcpServers: cur }, name)); mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "removed " + name + " — reconnecting the rest…" }); } }
         else if (sub === "connect" || sub === "reconnect") { mcpServers = []; connectMcp().then(() => render()); transcript.push({ role: "system", text: "reconnecting MCP servers from .nexus/mcp.json…" }); }
@@ -3167,6 +3191,8 @@ function nexusTui(engine, cwd, nexusMd) {
     // auto-connect MCP servers defined in .nexus/mcp.json (non-blocking)
     const connectMcp = async () => { const cfg = loadMcpConfig(cwd); if (!cfg) return; for (const nm of Object.keys(cfg)) { const c = await mcpConnect(nm, cfg[nm], cwd); mcpServers.push(c); if (!loading) render(); } };
     connectMcp();
+    // warn once if this repo ships MCP servers / hooks but isn't trusted (they were NOT run)
+    if (_untrustedRepoConfig) transcript.push({ role: "system", text: yellow("⚠ this workspace defines MCP servers and/or hooks that would run commands — not loaded because the repo isn't trusted. ") + "Run " + cyan("/trust") + " to enable them" + gray("  (or export SENTINEL_TRUST_REPO=1)") });
     refreshGit(); // populate the status-bar branch indicator
     process.stdin.on("data", (d) => { try {
       if (loading) { finishBoot(); return; }   // any key skips the intro
