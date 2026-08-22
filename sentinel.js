@@ -1159,8 +1159,8 @@ const USEFUL_MODELS = (process.env.SENTINEL_MODELS ? process.env.SENTINEL_MODELS
 async function nexusSetup(opts) {
   opts = opts || {}; const log = opts.log || ((s) => console.log("  " + s)); const models = opts.models || USEFUL_MODELS;
   log(bold("Nexus setup"));
-  if (hasBin("claude")) log(green("● Claude Code detected") + gray(" — Nexus will use it headless by default, no config needed."));
-  else log(gray("○ Claude Code not found — for the strongest engine: ") + cyan("npm i -g @anthropic-ai/claude-code"));
+  if (hasBin("claude")) log(green("● Claude Code detected") + gray(" — available as a headless engine, or use ") + cyan("/connect claude <key>") + gray(" for real Claude via API (in-process)."));
+  else log(gray("○ For Claude: ") + cyan("/connect claude <sk-ant-…>") + gray(" (direct API, no CLI) — or ") + cyan("/connect") + gray(" to pick any local/cloud model."));
   const confirm = async (q) => opts.auto ? true : (opts.ask ? /^\s*(y|yes|)\s*$/i.test((await opts.ask(q)) || "") : true);
   const pullUseful = async () => { const tags = await ollamaTags(); for (const m of models) { if (tags.some((t) => t === m || t.startsWith(m + ":"))) log(green("● " + m + " already installed")); else { await ensureOllamaServer(log); await ollamaPull(m, log); } } };
   if (hasBin("ollama")) {
@@ -1175,7 +1175,7 @@ async function nexusSetup(opts) {
 }
 
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
-const { ollamaChat, ollamaTags, pickCoderModel, apiConfigured, API_BASE } = require("./lib/nexus/ollama"); // local/any-model client (lib/ollama.js)
+const { ollamaChat, ollamaTags, pickCoderModel, apiConfigured, API_BASE, hasAnthropic } = require("./lib/nexus/ollama"); // local/any-model client (lib/ollama.js)
 const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
 function coderShell(command, cwd) {
   return new Promise((resolve) => {
@@ -2033,6 +2033,7 @@ function nexusTui(engine, cwd, nexusMd) {
     const CMDS = [
       ["/help", "commands, input prefixes & keys"], ["/clear", "start a fresh chat"], ["/compact", "summarize & shrink the context"],
       ["/trust", "trust this workspace's .nexus MCP servers + hooks"],
+      ["/connect", "connect an AI: local model · Claude (API) · any provider"],
       ["/context", "show token / context usage"], ["/cost", "session token cost so far"], ["/budget", "set a spend cap in USD"],
       ["/report", "cost & usage report for chargeback (/report json|save|since <date>)"],
       ["/compliance", "write a signed audit+usage compliance bundle (SOC2/review)"],
@@ -3149,6 +3150,29 @@ function nexusTui(engine, cwd, nexusMd) {
           transcript.push({ role: "system", text: "Any-model API set → " + url + (ps[1] ? "  · model " + ps[1] : "  " + yellow("(set one with /model <name>)")) + (process.env.SENTINEL_API_KEY ? "" : "\n  " + yellow("no key yet — /api key <your-key> or export SENTINEL_API_KEY")) });
         }
         render();
+      }
+      else if (cmd === "/connect") {
+        const arg = (argstr || "").trim();
+        // set the Claude key inline:  /connect claude sk-ant-...
+        if (/^claude\s+\S/i.test(arg)) { process.env.ANTHROPIC_API_KEY = arg.split(/\s+/)[1]; transcript.push({ role: "system", text: green("Claude API key set for this session.") }); }
+        ollamaTags().then((locals) => {
+        locals = locals || [];
+        const opts = [];
+        locals.forEach((m) => opts.push({ name: m, note: "local · Ollama", apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = CTXW.ollama || 32768; } }));
+        if (hasAnthropic()) ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"].forEach((m) => opts.push({ name: m, note: "Claude · API (real Claude, not headless)", apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = 200000; } }));
+        if (API_BASE()) opts.push({ name: (sess.model && sess.model !== engine ? sess.model : "api-model"), note: API_BASE(), apply: () => { engine = "ollama"; } });
+        const selArg = /^claude\s+\S/i.test(arg) ? "claude" : arg;
+        if (!selArg) {
+          if (!opts.length) transcript.push({ role: "system", text: "No AIs connected yet — connect one:\n  local:  " + cyan("ollama pull qwen2.5-coder") + gray("   (then /connect)") + "\n  Claude: " + cyan("/connect claude <sk-ant-...>") + gray("   (or export ANTHROPIC_API_KEY)") + "\n  any:    " + cyan("/api <openai-compatible-url> [model]") });
+          else transcript.push({ role: "system", text: bold("Connect an AI") + gray("   /connect <n|name>") + "\n" + opts.map((o, i) => "  " + cyan((i + 1) + ")") + " " + bold(o.name) + gray("   " + o.note)).join("\n") + "\n  " + gray("current: ") + green(sess.model || engine) });
+        } else {
+          let sel = /^\d+$/.test(selArg) ? opts[+selArg - 1] : opts.find((o) => o.name.toLowerCase().includes(selArg.toLowerCase()));
+          if (!sel && selArg.toLowerCase() === "claude") sel = opts.find((o) => /^claude/.test(o.name));
+          if (!sel) transcript.push({ role: "system", text: "no match for '" + selArg + "' — run " + cyan("/connect") + " to see what's available" });
+          else { sel.apply(); transcript.push({ role: "system", text: "connected → " + green(sel.name) + gray("   (" + sel.note + ")") }); }
+        }
+        render();
+        });
       }
       else if (cmd === "/engine") {
         if (!arg) transcript.push({ role: "system", text: "engines (● installed):\n" + ENGINE_ORDER.map((e) => "  " + (engineAvail(e) ? green("●") : gray("○")) + " " + e + gray("  " + ENGINES[e].label + (ENGINES[e].paid ? "" : " · free")) + (e === engine ? "  " + cyan("(current)") : "")).join("\n") + "\nswitch with /engine <name>" });
