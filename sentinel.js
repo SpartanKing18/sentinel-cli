@@ -1177,6 +1177,36 @@ async function nexusSetup(opts) {
 // ---------- AI coder (terminal AI coding agent, local Ollama, dependency-free) ----------
 const { ollamaChat, ollamaTags, pickCoderModel, apiConfigured, API_BASE, hasAnthropic } = require("./lib/nexus/ollama"); // local/any-model client (lib/ollama.js)
 const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }, action: { type: "string", enum: ["tool", "final"] }, tool: { type: "string" }, args: { type: "object" }, final: { type: "string" } }, required: ["thought", "action"] };
+// Weak local models routinely mangle the tool schema — packing args into the
+// tool name ("list_dir{/home/x}", "run_command{ls -l}", "sysinfo{}", "discover(query:sysinfo)"),
+// sending args as a bare string, or dropping args entirely. Without this the tool
+// name never matches and EVERY call fails as "unknown tool" — so the model concludes
+// it has no tools. normalizeToolCall recovers the real name + args so tools still fire.
+const TOOL_ARGKEY = { run_command: "command", run_background: "command", read_file: "path", write_file: "path", edit_file: "path", list_dir: "path", make_dir: "path", mkdir: "path", delete: "path", delete_file: "path", rm: "path", move: "from", copy: "from", search: "pattern", grep: "pattern", find: "glob", glob: "glob", http_fetch: "url", web_fetch: "url", fetch_url: "url", http: "url", web_search: "query", discover: "query", remember: "text", check_background: "id", stop_background: "id", list_processes: "filter" };
+const KNOWN_ARGKEYS = new Set(["path", "command", "content", "query", "q", "url", "pattern", "glob", "find", "text", "note", "id", "filter", "to", "from", "dest", "name", "tasks", "todos", "items", "method", "replace", "recursive"]);
+function normalizeToolCall(o) {
+  let name = o && o.tool, a = o && o.args;
+  if (name == null) return { name, a: (a && typeof a === "object") ? a : {} };
+  name = String(name).trim();
+  // strip a trailing (...) or {...} that the model packed onto the tool name
+  let inner = null;
+  const m = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[\(\{]([\s\S]*)[\)\}]\s*$/);
+  if (m) { name = m[1]; inner = m[2].trim(); }
+  if (!name.startsWith("mcp__")) name = name.toLowerCase();
+  // if args is already a good object, keep it; else rebuild from a string / the packed inner text
+  if (a && typeof a === "object" && !Array.isArray(a) && Object.keys(a).length) return { name, a };
+  a = {};
+  let raw = (typeof a === "string" && a.trim()) ? a.trim() : (typeof (o && o.args) === "string" ? String(o.args).trim() : "") || (inner || "");
+  if (raw) {
+    let parsed = null;
+    if (raw.startsWith("{")) { try { parsed = JSON.parse(raw); } catch (_) {} }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { name, a: parsed };
+    const kv = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*([\s\S]+)$/);
+    if (kv && KNOWN_ARGKEYS.has(kv[1].toLowerCase())) a[kv[1].toLowerCase()] = kv[2].trim().replace(/^["']|["']$/g, "");
+    else a[TOOL_ARGKEY[name] || "value"] = raw.replace(/^["']|["']$/g, "");
+  }
+  return { name, a };
+}
 function coderShell(command, cwd) {
   return new Promise((resolve) => {
     const p = spawn(process.platform === "win32" ? "cmd.exe" : "/bin/sh", [process.platform === "win32" ? "/c" : "-c", command], { cwd });
@@ -1351,7 +1381,7 @@ async function aiCoder(argv) {
         if (!didTool && nudges++ < 3) { messages.push({ role: "tool", content: "You have not taken any action yet. Do the real work first." }); continue; }
         console.log("\n  " + green("done: ") + bold(o.final || "done") + "\n"); break;
       }
-      const name = o.tool, a = o.args || {}; let result;
+      const { name, a } = normalizeToolCall(o); let result;
       try {
         if (name === "read_file") { const t = fs.readFileSync(path.resolve(cwd, a.path), "utf8"); result = { content: t.slice(0, 16000) }; if (!printMode) console.log("  " + cyan("read ") + a.path); }
         else if (name === "list_dir") { const d = path.resolve(cwd, a.path || "."); result = { items: fs.readdirSync(d, { withFileTypes: true }).map((e) => (e.isDirectory() ? e.name + "/" : e.name)).slice(0, 200) }; if (!printMode) console.log("  " + cyan("ls ") + (a.path || ".")); }
@@ -1809,7 +1839,7 @@ async function ollamaExec(model, task, ctx, cwd, signal) {
     messages.push({ role: "assistant", content: raw });
     if (o.thought) console.log("    " + gray(o.thought));
     if (o.action === "final") { if (!didTool && step < 3) { messages.push({ role: "tool", content: "Do the real work first." }); continue; } return { ok: true, output: log + "\n" + (o.final || "") }; }
-    const name = o.tool, a = o.args || {}; let result;
+    const { name, a } = normalizeToolCall(o); let result;
     try {
       if (name === "read_file") result = { content: fs.readFileSync(path.resolve(cwd, a.path), "utf8").slice(0, 14000) };
       else if (name === "list_dir") result = { items: fs.readdirSync(path.resolve(cwd, a.path || "."), { withFileTypes: true }).map((e) => e.isDirectory() ? e.name + "/" : e.name).slice(0, 200) };
@@ -1936,7 +1966,7 @@ async function nexusRun(argv) {
 
 // Full-screen chat TUI (alt-screen, scrolling transcript, fixed bottom input box). No deps.
 // Whimsical status verbs — Claude Code's set PLUS Nexus-originals (marked below).
-const FORGE = ["Accomplishing", "Actioning", "Actualizing", "Baking", "Booping", "Brewing", "Calculating", "Cerebrating", "Channelling", "Churning", "Clauding", "Coalescing", "Cogitating", "Combobulating", "Computing", "Concocting", "Conjuring", "Considering", "Cooking", "Crafting", "Creating", "Crunching", "Deliberating", "Determining", "Discombobulating", "Divining", "Doing", "Effecting", "Elucidating", "Enchanting", "Envisioning", "Finagling", "Flibbertigibbeting", "Forging", "Forming", "Frolicking", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Hustling", "Ideating", "Imagining", "Incubating", "Inferring", "Jiving", "Kneading", "Manifesting", "Marinating", "Meandering", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating", "Perusing", "Philosophising", "Pondering", "Pontificating", "Processing", "Puttering", "Puzzling", "Reticulating", "Ruminating", "Scheming", "Schlepping", "Shimmying", "Shucking", "Simmering", "Smooshing", "Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing", "Thinking", "Tinkering", "Transmuting", "Unfurling", "Vibing", "Wandering", "Whirring", "Wibbling", "Wizarding", "Working", "Wrangling",
+const FORGE = ["Accomplishing", "Actioning", "Actualizing", "Baking", "Booping", "Brewing", "Calculating", "Cerebrating", "Channelling", "Churning", "Coalescing", "Cogitating", "Combobulating", "Computing", "Concocting", "Conjuring", "Considering", "Cooking", "Crafting", "Creating", "Crunching", "Deliberating", "Determining", "Discombobulating", "Divining", "Doing", "Effecting", "Elucidating", "Enchanting", "Envisioning", "Finagling", "Flibbertigibbeting", "Forging", "Forming", "Frolicking", "Generating", "Germinating", "Hatching", "Herding", "Honking", "Hustling", "Ideating", "Imagining", "Incubating", "Inferring", "Jiving", "Kneading", "Manifesting", "Marinating", "Meandering", "Moseying", "Mulling", "Mustering", "Musing", "Noodling", "Percolating", "Perusing", "Philosophising", "Pondering", "Pontificating", "Processing", "Puttering", "Puzzling", "Reticulating", "Ruminating", "Scheming", "Schlepping", "Shimmying", "Shucking", "Simmering", "Smooshing", "Spelunking", "Spinning", "Stewing", "Sussing", "Synthesizing", "Thinking", "Tinkering", "Transmuting", "Unfurling", "Vibing", "Wandering", "Whirring", "Wibbling", "Wizarding", "Working", "Wrangling",
   // Nexus-original verbs (built from scratch):
   "Nexusing", "Nebulizing", "Weaving", "Orchestrating", "Constellating", "Tessellating", "Kindling", "Untangling", "Refracting", "Distilling", "Alchemizing", "Threading", "Warping", "Grokking", "Percussing", "Lucubrating", "Quantizing", "Foraging", "Splicing", "Braiding", "Zhuzhing", "Effervescing", "Crystallizing", "Cascading"];
 // Feature tips shown while a turn is running. NEXUS_TIPS are engine-agnostic (Nexus's own
@@ -2166,7 +2196,7 @@ function nexusTui(engine, cwd, nexusMd) {
             L.push("  " + dim(gray("● thinking" + (expanded ? ":" : " (ctrl+o to show)"))));
             if (expanded) for (const ln of wrap(it.full).slice(0, 24)) L.push("    " + dim(gray(ln)));
           } else if (it.type === "tool") {
-            const dot = it.status === "run" ? yellow(spin[(Date.now() / 90 | 0) % spin.length]) : it.status === "err" ? red("●") : green("●");
+            const dot = it.status === "run" ? yellow(spin[Math.floor(Date.now() / 90) % spin.length]) : it.status === "err" ? red("●") : green("●");
             const secs = it.end ? ((it.end - it.start) / 1000).toFixed(1) + "s" : ((Date.now() - it.start) / 1000).toFixed(1) + "s";
             L.push("  " + dot + " " + bold(it.label) + gray("  " + secs));
             if (expanded && it.detail) for (const ln of wrap(stripA(it.detail)).slice(0, 6)) L.push("    " + gray("⎿ " + ln));
@@ -2176,7 +2206,7 @@ function nexusTui(engine, cwd, nexusMd) {
         if (busy && m === cur()) {
           const el = Math.round((Date.now() - busyStart) / 1000);
           const tok = sess.liveOut ? " · " + fmtK(sess.liveOut) + " tokens" : "";
-          L.push("  " + mag(spin[(Date.now() / 90 | 0) % spin.length] + " " + busyWord + "…") + gray("  (" + el + "s" + tok + " · ctrl+c to stop)"));
+          L.push("  " + mag(spin[Math.floor(Date.now() / 90) % spin.length] + " " + busyWord + "…") + gray("  (" + el + "s" + tok + " · ctrl+c to stop)"));
           const et = ENGINE_TIPS[engine] || [], tips = [];
           for (let k = 0; k < Math.max(NEXUS_TIPS.length, et.length); k++) { if (et[k]) tips.push(et[k]); if (NEXUS_TIPS[k]) tips.push(NEXUS_TIPS[k]); } // interleave so an engine-specific tip shows first
           if (tips.length) L.push("  " + dim(gray("tip: " + tips[Math.floor(el / 4) % tips.length])));
@@ -2483,7 +2513,7 @@ function nexusTui(engine, cwd, nexusMd) {
             oMsgs.push({ role: "assistant", content: raw });
             if (o.thought) { const t = ensureText(); t.full += (t.full ? "\n" : "") + o.thought; render(); }
             if (o.action === "final") { if (!didTool && nudges++ < 2) { oMsgs.push({ role: "tool", content: "Do the real work with tools first." }); continue; } if (o.final) { const t = ensureText(); t.full += (t.full ? "\n\n" : "") + o.final; } break; }
-            const name = o.tool, a = o.args || {};
+            const { name, a } = normalizeToolCall(o);
             const card = { type: "tool", id: "o" + step, name, label: olbl(name, a), status: "run", start: Date.now(), detail: JSON.stringify(a).slice(0, 400) };
             block.items.push(card);
             if (name === "run_command") { runningShells++; stat.cmds++; }
