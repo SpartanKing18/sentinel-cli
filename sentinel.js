@@ -1184,19 +1184,32 @@ const CODER_SCHEMA = { type: "object", properties: { thought: { type: "string" }
 // it has no tools. normalizeToolCall recovers the real name + args so tools still fire.
 const TOOL_ARGKEY = { run_command: "command", run_background: "command", read_file: "path", write_file: "path", edit_file: "path", list_dir: "path", make_dir: "path", mkdir: "path", delete: "path", delete_file: "path", rm: "path", move: "from", copy: "from", search: "pattern", grep: "pattern", find: "glob", glob: "glob", http_fetch: "url", web_fetch: "url", fetch_url: "url", http: "url", web_search: "query", discover: "query", remember: "text", check_background: "id", stop_background: "id", list_processes: "filter" };
 const KNOWN_ARGKEYS = new Set(["path", "command", "content", "query", "q", "url", "pattern", "glob", "find", "text", "note", "id", "filter", "to", "from", "dest", "name", "tasks", "todos", "items", "method", "replace", "recursive"]);
+const KNOWN_TOOLS = new Set(["read_file", "write_file", "edit_file", "list_dir", "run_command", "run_background", "check_background", "stop_background", "search", "grep", "find", "find_files", "glob", "http_fetch", "web_fetch", "fetch_url", "http", "web_search", "search_web", "google", "todo_write", "todos", "todo_list", "write_todos", "sysinfo", "system_info", "list_processes", "ps", "make_dir", "mkdir", "move", "rename", "move_file", "copy", "copy_file", "delete", "delete_file", "rm", "remember", "discover", "spawn_agents"]);
+// A tool "name" that is really a shell command line — weak models often emit
+// {tool:"cat /etc/passwd"} or {tool:"ls /bin/*"} instead of run_command.
+const SHELL_CMD = /^(sudo\s+)?(ls|cat|grep|egrep|fgrep|echo|cd|pwd|whoami|id|uname|hostname|ps|top|df|du|free|date|env|printenv|which|type|find|locate|head|tail|awk|sed|cut|tr|sort|uniq|wc|xargs|tee|curl|wget|ping|traceroute|nmap|nc|ncat|dig|host|nslookup|ip|ifconfig|iwconfig|netstat|ss|arp|route|cp|mv|rm|mkdir|rmdir|touch|ln|stat|file|chmod|chown|tar|gzip|gunzip|zip|unzip|git|make|gcc|python3?|node|npm|npx|pip3?|bash|sh|zsh|kill|pkill|killall|systemctl|service|apt|apt-get|dpkg|ssh|scp|rsync|sentinel|nexus|nikto|sqlmap|hydra|john|hashcat|gobuster|ffuf|masscan|whatweb|searchsploit|msfconsole)(\s|$)/i;
+function looksLikeCommand(s) { s = String(s || "").trim(); return SHELL_CMD.test(s) || /^\.{0,2}\//.test(s) || (/\s/.test(s) && /[\/*.~|>]/.test(s)); }
 function normalizeToolCall(o) {
   let name = o && o.tool, a = o && o.args;
   if (name == null) return { name, a: (a && typeof a === "object") ? a : {} };
-  name = String(name).trim();
+  const orig = String(name).trim();
   // strip a trailing (...) or {...} that the model packed onto the tool name
-  let inner = null;
-  const m = name.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[\(\{]([\s\S]*)[\)\}]\s*$/);
-  if (m) { name = m[1]; inner = m[2].trim(); }
-  if (!name.startsWith("mcp__")) name = name.toLowerCase();
-  // if args is already a good object, keep it; else rebuild from a string / the packed inner text
-  if (a && typeof a === "object" && !Array.isArray(a) && Object.keys(a).length) return { name, a };
+  let inner = null, bare = orig;
+  const m = orig.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[\(\{]([\s\S]*)[\)\}]\s*$/);
+  if (m) { bare = m[1]; inner = m[2].trim(); }
+  name = bare.startsWith("mcp__") ? bare : bare.toLowerCase();
+  const haveArgs = a && typeof a === "object" && !Array.isArray(a) && Object.keys(a).length;
+  // unknown tool name that is actually a shell command → route to run_command
+  if (!KNOWN_TOOLS.has(name) && !name.startsWith("mcp__")) {
+    const cmd = m ? (inner ? bare + " " + inner : bare) : orig;
+    const argCmd = haveArgs && typeof (a.command || a.cmd) === "string" ? (a.command || a.cmd) : null;
+    if (argCmd) return { name: "run_command", a: { command: argCmd } };
+    if (looksLikeCommand(cmd) || looksLikeCommand(name)) return { name: "run_command", a: { command: cmd } };
+  }
+  if (haveArgs) return { name, a };
   a = {};
-  let raw = (typeof a === "string" && a.trim()) ? a.trim() : (typeof (o && o.args) === "string" ? String(o.args).trim() : "") || (inner || "");
+  const argStr = (typeof (o && o.args) === "string") ? String(o.args).trim() : "";
+  let raw = argStr || (inner || "");
   if (raw) {
     let parsed = null;
     if (raw.startsWith("{")) { try { parsed = JSON.parse(raw); } catch (_) {} }
