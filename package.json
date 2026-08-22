@@ -1,7 +1,7 @@
 {
   "name": "sentinel-cli",
   "version": "2.29.0",
-  "description": "Sentinel — terminal edition. A dependency-free security console CLI/TUI for Windows and Linux: native port scanner, reverse shells, encoders, payloads, and cheat sheets.",
+  "description": "Sentinel \u2014 terminal edition. A dependency-free security console CLI/TUI for Windows and Linux: native port scanner, reverse shells, encoders, payloads, and cheat sheets.",
   "bin": {
     "sentinel": "sentinel.js"
   },
@@ -19,7 +19,9 @@
   "pkg": {
     "targets": [
       "node18-linux-x64",
-      "node18-win-x64"
+      "node18-win-x64",
+      "node18-macos-x64",
+      "node18-macos-arm64"
     ],
     "outputPath": "dist"
   },
