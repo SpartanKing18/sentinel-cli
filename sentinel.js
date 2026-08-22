@@ -3160,9 +3160,11 @@ function nexusTui(engine, cwd, nexusMd) {
         ollamaTags().then((locals) => {
         locals = locals || [];
         const opts = [];
-        locals.forEach((m) => opts.push({ name: m, note: "local · Ollama", apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = CTXW.ollama || 32768; } }));
-        if (hasAnthropic()) ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"].forEach((m) => opts.push({ name: m, note: "Claude · API (real Claude, not headless)", apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = 200000; } }));
-        if (API_BASE()) opts.push({ name: (sess.model && sess.model !== engine ? sess.model : "api-model"), note: API_BASE(), apply: () => { engine = "ollama"; } });
+        // switching AI starts a fresh conversation + resets the cost/context meters (like /engine)
+        const reset = () => { sess.userModel = false; sess.inTok = 0; sess.outTok = 0; sess.cost = 0; sess.ctxUsed = 0; warned50 = false; cont = false; oMsgs.length = 1; };
+        locals.forEach((m) => opts.push({ name: m, note: "local · free", paid: false, apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = CTXW.ollama || 32768; reset(); } }));
+        if (hasAnthropic()) ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"].forEach((m) => opts.push({ name: m, note: "Claude · API — BILLED to your Anthropic key", paid: true, apply: () => { delete process.env.SENTINEL_API_BASE; engine = "ollama"; sess.model = m; sess.ctxWindow = 200000; reset(); } }));
+        if (API_BASE()) opts.push({ name: (sess.model && sess.model !== engine && !/^claude/i.test(sess.model) ? sess.model : "api-model"), note: API_BASE() + " · likely billed", paid: true, apply: () => { engine = "ollama"; if (!sess.model || /^claude/i.test(sess.model) || sess.model === engine) sess.model = ""; reset(); } });
         const selArg = /^claude\s+\S/i.test(arg) ? "claude" : arg;
         if (!selArg) {
           if (!opts.length) transcript.push({ role: "system", text: "No AIs connected yet — connect one:\n  local:  " + cyan("ollama pull qwen2.5-coder") + gray("   (then /connect)") + "\n  Claude: " + cyan("/connect claude <sk-ant-...>") + gray("   (or export ANTHROPIC_API_KEY)") + "\n  any:    " + cyan("/api <openai-compatible-url> [model]") });
@@ -3171,7 +3173,7 @@ function nexusTui(engine, cwd, nexusMd) {
           let sel = /^\d+$/.test(selArg) ? opts[+selArg - 1] : opts.find((o) => o.name.toLowerCase().includes(selArg.toLowerCase()));
           if (!sel && selArg.toLowerCase() === "claude") sel = opts.find((o) => /^claude/.test(o.name));
           if (!sel) transcript.push({ role: "system", text: "no match for '" + selArg + "' — run " + cyan("/connect") + " to see what's available" });
-          else { sel.apply(); transcript.push({ role: "system", text: "connected → " + green(sel.name) + gray("   (" + sel.note + ")") }); }
+          else { sel.apply(); transcript.push({ role: "system", text: "connected → " + green(sel.name) + gray("   (" + sel.note + ")") + (sel.paid ? "\n  " + yellow("⚠ PAID — billed to your API key, not the free local engine") : "") + (sel.name === "api-model" ? "\n  " + gray("set the model with /model <name>") : "") }); }
         }
         render();
         });
