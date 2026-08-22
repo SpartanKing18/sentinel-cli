@@ -591,6 +591,7 @@ function labSandbox() {
 }
 
 function labDown(target) {
+  target = String(target || "").toLowerCase();   // match labUp, else teardown silently no-ops
   h1("Lab teardown");
   if (target && LAB_TARGETS[target] && LAB_TARGETS[target].kind === "docker") {
     const cmd = "docker rm -f nexus-lab-" + target;
@@ -691,7 +692,7 @@ async function nexusServe(args, ctx) {
     if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(ra)) return send(403, { error: "loopback only" }); // never expose to the network
     const url = req.url.split("?")[0];
     if (req.method === "GET" && url === "/health") return send(200, { ok: true, engine: engineDefault, version: VERSION });
-    if ((req.headers["authorization"] || "") !== "Bearer " + token) return send(401, { error: "unauthorized" });
+    { const _got = Buffer.from(req.headers["authorization"] || ""), _exp = Buffer.from("Bearer " + token); if (_got.length !== _exp.length || !crypto.timingSafeEqual(_got, _exp)) return send(401, { error: "unauthorized" }); }
     if (req.method === "POST" && url === "/run") {
       let body = ""; req.on("data", (d) => { body += d; if (body.length > 1e6) req.destroy(); });
       req.on("end", () => {
@@ -727,7 +728,8 @@ function serveDir(port, dir) {
   const fs = require("fs"), path = require("path");
   const srv = http.createServer((req, res) => {
     let p = path.join(dir, decodeURIComponent(req.url.split("?")[0]));
-    if (!path.resolve(p).startsWith(path.resolve(dir))) { res.writeHead(403); return res.end("forbidden"); }
+    const _root = path.resolve(dir), _rp = path.resolve(p);
+    if (_rp !== _root && !_rp.startsWith(_root + path.sep)) { res.writeHead(403); return res.end("forbidden"); }
     fs.stat(p, (e, st) => {
       if (e) { res.writeHead(404); return res.end("not found"); }
       if (st.isDirectory()) { const items = fs.readdirSync(p); res.writeHead(200, { "Content-Type": "text/html" }); return res.end(items.map((i) => `<a href="${req.url.replace(/\/$/, "")}/${i}">${i}</a>`).join("<br>")); }
@@ -1864,7 +1866,7 @@ async function nexusRun(argv) {
     else model = modelOverride || process.env.SENTINEL_MODEL || pickCoderModel(ms);
   }
   let state;
-  if (resume && fs.existsSync(stateFile)) { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); banner(); h1("Nexus — resuming run"); }
+  if (resume && fs.existsSync(stateFile)) { try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch (_) { console.log("  " + red("can't resume — the saved run state is unreadable")); return; } banner(); h1("Nexus — resuming run"); }
   else {
     const goal = goalParts.join(" ").trim();
     if (!goal) { console.log("  " + red("provide a goal:  sentinel nexus run \"build X\"")); return; }
