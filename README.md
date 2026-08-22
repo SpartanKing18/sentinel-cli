@@ -1,152 +1,86 @@
-<div align="center">
+# Sentinel CLI
 
-# Sentinel — Terminal Edition
+The terminal edition of Sentinel — a single command that drives a full security
+toolkit and hosts **Nexus**, the AI coding agent. Recon, exploitation helpers,
+practice labs, governance, and an autonomous AI layer, all from your shell.
 
-**A dependency-free security console for your terminal.**
+## Architecture
 
-[![CI](https://github.com/SpartanKing18/sentinel-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/SpartanKing18/sentinel-cli/actions/workflows/ci.yml)
+```
+   You (a command)
+        |
+        v
+   sentinel.js  (dispatch + first-run setup)
+        |
+        +--> nexus ------> Nexus engine (lib/nexus) ---> Ollama (local) | Claude / API (cloud)
+        |                    plan -> act -> observe, cost meter, /undo
+        |
+        +--> toolkit ----> external tools: nmap · sqlmap · nuclei · ffuf · httpx ...
+        |
+        +--> governance -> identity · usage ledger · compliance bundle
+        |
+        +--> lab --------> docker practice targets (spin up / tear down)
+        v
+   Results in your terminal
+```
 
-![License](https://img.shields.io/badge/license-proprietary-lightgrey)
-![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-2b3b5c)
-![Node](https://img.shields.io/badge/node-%E2%89%A518-339933)
-![Dependencies](https://img.shields.io/badge/dependencies-0-2ee6a6)
+Most subcommands run through the toolkit or governance layers; `nexus` (aliases
+`code`, `ai`) hands the turn to the AI engine, which edits files and runs commands
+against your workspace with a live token/cost readout.
 
-</div>
+## Project Structure
 
-Sentinel's command-line edition packs a native port scanner, reverse-shell
-generator, encoders, payload builders, and cheat sheets into a single file with
-**zero dependencies** — it runs anywhere Node does, and ships as standalone
-binaries that need no runtime at all. Perfect for a headless box over SSH.
+```
+sentinel-cli/
+├── sentinel.js           # entry point + command dispatch
+├── lib/
+│   ├── cli/              # command implementations & shared CLI helpers
+│   ├── nexus/            # the Nexus AI-coder engine  (also its own repo: SpartanKing18/nexus)
+│   ├── governance/       # identity, usage ledger, compliance/policy
+│   └── toolkit/          # external-tool drivers (recon / web / passwords / ...)
+├── scripts/              # build & release helpers
+├── test/                 # test suite (npm test)
+├── docs/                 # command reference & guides
+├── package.json
+└── README.md
+```
 
----
+## Installation
 
-## Install
-
-**git clone — smallest, self-updating (needs Node 18+)**
-
-```bash
+```
+# from source (Node 18+)
 git clone https://github.com/SpartanKing18/sentinel-cli
-cd sentinel-cli
-node sentinel.js            # or: node sentinel.js scan 10.0.0.1
-```
+cd sentinel-cli && npm install && node sentinel.js
 
-Only ~300 KB on disk (one file), and `git pull` gets the latest. No `npm install` — it uses only Node built-ins.
-
-**Standalone binary — no Node required (~52 MB)**
-
-```bash
-# Linux
-chmod +x Sentinel-cli-linux
-./Sentinel-cli-linux
-
-# Windows (PowerShell or cmd)
-.\Sentinel-cli-windows.exe
-```
-
-**From source — Node 18+**
-
-```bash
-node sentinel.js          # or: npm start
+# or grab a standalone binary from Releases and put it on PATH
 ```
 
 ## Usage
 
-Run with no arguments for the interactive menu, or use one-shot commands:
-
 ```
-sentinel scan <host> [ports]        TCP scan (ports: top | 1-1024 | 80,443)
-sentinel revshell <lang> <ip> <port>
-sentinel encode <b64|hex|url> <text>
-sentinel decode <b64|hex|url> <text>
-sentinel hash <text>                md5 / sha1 / sha256 / sha512
-sentinel hashid <hash>              identify a hash type
-sentinel genpass [length]           generate a strong random password (default 20)
-sentinel myip                       show your public IP address
-sentinel status <code>              look up an HTTP status code
-sentinel lab [target]               practice targets (dvwa, juice, webgoat, bwapp, mutillidae)
-sentinel payloads [class]           payload library (sqli, xss, lfi, cmdi, ssti, ssrf)
-sentinel cheats [topic]             nmap · shells · privesc · transfer · web · cracking · windows
-sentinel tools                      tool catalog + install commands
-sentinel --help | --version
+sentinel nexus --tui        # the AI coding agent
+sentinel nexus --engine ollama   # local, private models
+sentinel <tool> ...         # drive the security toolkit
 ```
 
-### Example
-
-```console
-$ sentinel scan 10.10.14.7 top
-  PORT   SERVICE     BANNER
-  22     ssh         SSH-2.0-OpenSSH_9.6p1
-  80     http
-  443    https
-  ● 3 open ports on 10.10.14.7
-  nmap: nmap -sV -sC -p 22,80,443 10.10.14.7
-```
-
-## Features
-
-| Command    | What it does                                                        |
-| ---------- | ------------------------------------------------------------------- |
-| `scan`     | Native async TCP scanner with service detection and banner grabbing |
-| `revshell` | bash · python3 · nc · php · perl · powershell one-liners             |
-| `encode`   | base64 · hex · URL, plus MD5/SHA hashing and a hash identifier       |
-| `cheats`   | Copy-ready one-liners for every stage of an engagement              |
-| `tools`    | Catalog of tools with install commands                              |
-
-## Nexus — the AI coding agent
-
-Nexus is a full-screen terminal coding agent built into Sentinel. It drives
-whichever AI you have, with enterprise controls and a local, private option.
+## Running Tests
 
 ```
-sentinel nexus                 open the agent (Claude if installed, else local)
-sentinel nexus -e ollama       drive a 100% local, private, free agent
-sentinel nexus "add tests to server.js and run them"   one-shot task
-sentinel nexus run "<goal>"    autonomous multi-step run
-sentinel policy                show the effective security policy
-sentinel audit verify          verify the tamper-evident audit trail (CI-friendly)
+npm test
 ```
 
-- **Works with any AI** — one registry drives Claude Code, Gemini, Codex, OpenCode,
-  Aider, and local Ollama models. A flag meant for one engine can never leak into
-  another. Switch with `/engine`, pick a model with `/model`.
-- **Multiple models together** — `/team` runs an architect, a builder, and an
-  independent reviewer (each a model of your choice) and loops until the review passes.
-- **Enterprise guardrails** — a `.nexus/policy.json` (protected paths, denied commands,
-  per-turn write limits, secret-write blocking) enforced on the agent, with an org
-  floor a local config can only tighten, plus a hash-chained audit trail.
-- **In the UI** — `/settings` for every option, output styles (`/style`), background
-  commands (`run_background`), a `remember` tool for durable project rules, cost
-  meters, plan mode, checkpoints/undo, and more.
+## Status
 
-## Project structure
+Active. The Nexus engine lives in `lib/nexus` and is mirrored to its own repo
+([SpartanKing18/nexus](https://github.com/SpartanKing18/nexus)); the CLI is the
+interactive host for it plus the toolkit and governance layers.
 
-```
-sentinel.js         entry point — CLI dispatch + the Nexus agent full-screen TUI
-lib/                pure, testable logic in four domain subpackages:
-  cli/                command registry, --help catalog, settings, presentation
-  toolkit/            security & OSINT primitives (encoders, scanners, IOC, JWT…)
-  nexus/              AI coding-agent infrastructure (engines, cost, tools, loop)
-  governance/         policy guardrails, audit chain, usage ledger, compliance
-test/run.js         framework-free unit suite (npm test) — 354 assertions
-docs/               ARCHITECTURE, RESPONSIBLE_USE, BUILDLOG, PR notes
-.github/workflows/  CI: node --check + tests + CLI smoke on Node 18/20/22
-```
+## Security
 
-Full module map and the test-enforced design invariants (engine isolation, least
-privilege, provenance): see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Run the
-tests with `npm test`.
-
-## Build
-
-```bash
-npx @yao-pkg/pkg .        # writes dist/Sentinel-cli-linux and Sentinel-cli-windows.exe
-```
-
-## Responsible use
-
-Sentinel is for **authorized** security testing and learning only. Only scan or
-target systems you own or have explicit written permission to test.
+The CLI can run external tools and, via Nexus, edit files and run commands. Use it
+only against systems you're authorized to test, and prefer the local `ollama` engine
+for sensitive code. Credentials are never stored in source.
 
 ## License
 
-© 2026 Sentinel · All rights reserved
+See `LICENSE`.
